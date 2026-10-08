@@ -1,37 +1,93 @@
-# OpenCircuit Web Studio v0.2
+# OpenCircuit Web Studio v0.4 — GUI-First Circuit Simulation
 
-A beginner-friendly React + TypeScript **visual schematic editor**. No electrical simulation yet.
+A beginner-friendly browser-based circuit design and SPICE simulation application with a modern 2D schematic editor, electrical net extraction, and Python FastAPI + ngspice simulation backend.
 
 ## Requirements
-- Node.js 22.12+ (required for the built-in TypeScript test runner)
+- **Frontend:** Node.js 22.12+ (supports built-in TypeScript test runner)
+- **Backend:** Python 3.10+ with `fastapi`, `uvicorn`, and `pydantic`
+- **SPICE Engine:** `ngspice` (supports KiCad shared library `ngspice.dll` or standalone `ngspice` CLI in PATH)
 
-## Run
+## Quick Start
+
+### 1. Start the Simulation Backend (Terminal 1)
+```bash
+# Start FastAPI backend on http://localhost:8000
+npm run backend
+# or: python -m uvicorn backend.main:app --reload --port 8000
+```
+
+### 2. Start the Web Frontend (Terminal 2)
 ```bash
 npm install
 npm run dev
 ```
-Open the local URL printed by Vite (usually http://localhost:5173).
+Open the URL shown by Vite (typically http://localhost:5173).
 
-## Test and build
+## Testing and Verification
 ```bash
+# Run Frontend Node.js unit tests (14 test cases)
 npm test
+
+# Run Backend Python test suite (4 test cases)
+npm run test:backend
+
+# Verify TypeScript typecheck and production build
 npm run build
 ```
-`npm test` checks project-file validation, v0.1 migration and rotated pin coordinates. `npm run build` checks TypeScript and produces the Vite build.
 
-## Editor controls
-1. Click R, C, L, V or G in the component library, then click the canvas; or drag a component from the library onto the canvas. Placement snaps to the 20-unit grid.
-2. Select **Wire**, then click two pin dots. Select a component and drag it; its connected wire follows the pin.
-3. Select a component to edit **Value**, rotate it by 90°, or delete it. Click a wire to select/delete it. **Delete** also works outside inputs.
-4. Use **Pan** and drag the canvas (or middle-drag); use **+ / −** to zoom from 50% to 300%.
-5. Use **Undo / Redo** or **Ctrl+Z / Ctrl+Y** (Cmd on macOS). Editing a value commits one undo step when its field loses focus. Press **Esc** to cancel a pending wire or drag.
-6. Use **Save JSON / Open JSON**. Version 2 projects separate `components` with stable `pins` and `wires` from `schematic` placements. Existing version 1 JSON files load through migration; saved files use version 2. Opening an invalid file leaves the current project unchanged.
+## Features in v0.4
 
-## Limitations
-- This draws a circuit; it does **not** extract electrical nets, validate electrical values, generate a SPICE netlist, simulate, plot waveforms or provide a breadboard view.
-- Wires are single right-angle paths between pins. They may overlap; bends and junctions are not editable or connected.
-- Undo/Redo covers project edits, not zoom/pan. It keeps up to 100 undo steps; opening a file starts a new history.
-- Project import checks version, IDs, types, placement, references, duplicates and file size. It does not yet parse electrical units or implement migrations beyond v0.1.
+### 1. GUI-First Layout
+- **Top Toolbar:**
+  - `＋ New`: Clear canvas to start a new circuit.
+  - `⇪ Open` / `⤓ Save`: Open and save versioned JSON project files (`v2`).
+  - `↶ Undo` / `↷ Redo`: 100-step immutable history stack (Ctrl+Z / Ctrl+Y).
+  - `▶ Run Simulation`: Opens the Simulation Settings dialog.
+  - `Preview Netlist`: Inspect generated SPICE netlist and download `.cir` files.
+  - Backend status badge: Real-time indication of backend connectivity.
+- **Left Panel (Library & Tools):**
+  - Select / Move tool, Wire tool, and Pan tool.
+  - R, C, L, V, and Ground components with click-to-place and drag-and-drop.
+- **Center Canvas:**
+  - 20-unit snap-to-grid SVG canvas.
+  - Wires dynamically tracking component translations and 90° rotations.
+  - Polarized Voltage Source symbols with clear `+` and `−` terminal indicators.
+  - Zoom controls (50% to 300%) and pan.
+- **Right Properties Panel:**
+  - Live value editing with SI prefix support (`1kΩ`, `100nF`, `10mH`, `5V`).
+  - Pin-to-Node electrical breakdown for each selected component.
+  - Rotation and deletion controls.
+- **Bottom Simulation Results Panel:**
+  - Collapsible/expandable panel with tabs.
+  - Status indicators: `Idle`, `Running...`, `Completed`, `Failed`.
+  - **Node Voltages Table:** Node name, voltage in volts, humanized SI notation, and connected pins.
+  - **Branch Currents Table:** Voltage source branch currents in amperes and humanized SI notation.
+  - Clear error reporting for connection failures or invalid circuits.
+  - Future Waveform Viewer tab placeholder (`v0.5`).
 
-## Next steps
-Add wire junctions and segment routing, then electrical net extraction and unit validation before SPICE export. A future simulation service must isolate ngspice and enforce resource limits.
+### 2. Simulation Backend (FastAPI + ngspice)
+- Endpoint `GET /api/health`: Service health and ngspice detection.
+- Endpoint `POST /api/simulate`:
+  - Strict input validation: size limit (64 KB), line limit (500 lines), regex-whitelisted SPICE statements only.
+  - No `shell=True` execution; sandboxed subprocess with a strict 5.0-second timeout.
+  - Real calculations via ngspice (no hardcoded outputs).
+  - Correct voltage source polarity mapping from pin definitions (`pin 1 = +`, `pin 0 = −`).
+
+## Verified Test Cases
+1. **Voltage Divider (10V, R1=1kΩ, R2=1kΩ):**
+   - V(0) = 0.000 V (Ground)
+   - V(n1) = 10.000 V
+   - V(n2) = 5.000 V (Vout)
+   - I(V1) = -0.005 A (-5 mA)
+2. **RC Low-Pass Filter at DC Steady State (5V, R1=1kΩ, C1=100nF):**
+   - V(0) = 0.000 V
+   - V(n1) = 5.000 V
+   - V(n2) = 5.000 V
+   - I(V1) = 0.000 A (capacitor acts as an open circuit in DC steady state)
+3. **Backend Unavailable / Disconnected:**
+   - Graceful error banner with instructions to run `npm run backend`.
+
+## Current Limitations & Next Steps (v0.5)
+- **v0.4:** Supports DC Operating Point (`.op`) simulation.
+- **v0.5 (Planned):** Transient analysis (`.tran`), AC frequency response (`.ac`), and interactive waveform charts.
+- **T-junctions:** Wires connect pin-to-pin; intermediate branch junctions on wires are planned for a future layout milestone.

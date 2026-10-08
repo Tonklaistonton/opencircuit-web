@@ -9,6 +9,13 @@ export const GRID = 20;
 export const snap = (value: number) => Math.round(value / GRID) * GRID;
 export const defaults: Record<Kind, string> = {R: '1kΩ', C: '100nF', L: '10mH', V: '5V', G: 'GND'};
 export const names: Record<Kind, string> = {R: 'Resistor', C: 'Capacitor', L: 'Inductor', V: 'Voltage Source', G: 'Ground'};
+export const pinLabels: Record<Kind, string[]> = {
+  R: ['1', '2'],
+  C: ['1', '2'],
+  L: ['1', '2'],
+  V: ['−', '+'], // pin 0 is negative (-), pin 1 is positive (+)
+  G: ['GND'],
+};
 const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G'];
 const rotations: Rotation[] = [0, 90, 180, 270];
 const isRecord = (value: unknown): value is Record<string, unknown> =>
