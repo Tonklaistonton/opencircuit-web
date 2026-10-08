@@ -7,13 +7,13 @@ A beginner-friendly browser-based circuit design and SPICE simulation applicatio
 The app now boots into an **editable Op-Amp schematic example**, rather than the old four-component starter view. Use **File → Open RC Starter Example** for the legacy circuit, or **New** for a blank schematic.
 
 - **Modern CAD chrome:** File / Edit / Place / View / PSpice menus, vertical tool rail, project explorer, component search, Dark/Light toggle and CAD sheet with border/title block.
-- **Multi-pin symbol:** Generic uA741-style Op-Amp (IN−, IN+, OUT, V+, V−). Pin positions rotate correctly; wiring and net extraction understand all pins. This symbol is **schematic only** until a verified SPICE op-amp model is implemented; trying to simulate it displays a clear blocking validation error.
+- **Op-Amp simulation:** Five-pin symbol (IN−, IN+, OUT, V+, V−) now supports a **Generic Op-Amp** approximate DC behavioral macro-model (gain 100,000, output limited to rails ±1.5 V of headroom, 50 Ω output resistance, 1 GΩ differential input resistance). SPICE deck includes an allowlisted built-in `.subckt` and `.op`; the backend validates the exact macro. **This is NOT the manufacturer's uA741 model.**
 - **Wire routing:** choose Wire; click a pin, existing wire, or empty grid to start. Click grid points to lay orthogonal bends. Click a pin/existing wire to finish and create a real T-junction when needed. Double-click empty grid to finish with a dangling electrical endpoint. Press Esc or right-click to cancel. Select a wire, double-click a straight segment to add an editable bend, and drag orange handles to reroute.
 - **Net Alias:** select wire and edit alias in Properties, or select a component and edit aliases per pin. Pins with the same valid alias are connected electrically even without a drawn wire. Aliases appear on the schematic.
 - **Electrical integrity:** explicit junction endpoints are stored in optional `junctions` along with optional `netAliases` in backwards-compatible v2 project JSON. Wire intersections without an explicit junction **do not** short nets; save/open supports new data.
 - **Testing:** `npm test` for model/routing/aliases, `npm run test:backend` for Python safety and backend tests, `npm run build` for TypeScript/Vite.
 
-**Not yet implemented:** a verified uA741 transistor-level/behavioral SPICE model, importable symbol/model libraries, true multiple schematic sheets, comprehensive ERC, advanced routing operations. Do not conflate UI/schematic drawing with successful simulation of an op-amp.
+**Still not implemented:** authentic vendor uA741 SPICE models, importable symbol/model libraries, true multiple schematic sheets, comprehensive ERC, and advanced routing. **Generic Op-Amp DC approximation is now simulated using ngspice, but is not a precise uA741 model.**
 
 ## Requirements
 - **Frontend:** Node.js 22.12+ (supports built-in TypeScript test runner)

@@ -19,3 +19,11 @@ test('Thai translates dynamic circuit validation and notifications', () => {
     'เปิดตัวอย่าง Op-Amp แล้ว (โหมดเขียนวงจร) ยังไม่มี SPICE Model สำหรับ uA741');
   assert.equal(translate('en', 'Placed C3.'), 'Placed C3.');
 });
+
+test('Thai explains generic Op-Amp approximation and older unsupported uA741 symbol', () => {
+  const note = 'U1: Generic Op-Amp is an approximate rail-limited DC model, NOT a validated uA741 model.';
+  const outdated = 'U1: Unsupported Op-Amp model "uA741 (symbol)". Select "Generic Op-Amp" in Properties, or import a verified vendor SPICE model (not supported yet).';
+  assert.match(translate('th', note), /โมเดล DC แบบประมาณค่า/);
+  assert.match(translate('th', outdated), /โมเดล Op-Amp/);
+  assert.equal(translate('en', outdated), outdated);
+});

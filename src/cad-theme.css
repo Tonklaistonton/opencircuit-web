@@ -97,3 +97,9 @@ body, button, input, dialog {font-family:Inter,"Noto Sans Thai","Leelawadee UI",
 .tools .hint{line-height:1.75}
 .design-explorer .explorer-sheet{overflow-wrap:anywhere}
 @media(max-width:1280px){header .actions{gap:5px}header .actions button{padding:7px 9px}}
+
+/* Built-in Op-Amp simulation: distinguish approximate behavioral model from vendor device */
+.opamp-model-note{margin:8px 0 12px;padding:10px;border:1px solid var(--line);background:var(--panel-alt);border-radius:7px;font-size:12px;line-height:1.55}
+.opamp-model-note strong{color:var(--accent-text)}
+.opamp-model-note p{color:var(--muted);margin:6px 0 9px}
+.opamp-model-note button{width:100%;height:auto;white-space:normal;text-align:left;font-size:11px;line-height:1.5;padding:8px}

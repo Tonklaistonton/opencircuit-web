@@ -134,6 +134,12 @@ export const thai: Record<string, string> = {
   'Project file is too large.': 'ไฟล์โปรเจกต์มีขนาดใหญ่เกินไป',
   'Invalid file.': 'ไฟล์ไม่ถูกต้อง',
   'Invalid circuit.': 'วงจรไม่ถูกต้อง',
+  'Op-Amp Model': 'โมเดล Op-Amp',
+  'Use Generic Op-Amp (DC Approximation)': 'ใช้ Generic Op-Amp (โมเดลประมาณค่า DC)',
+  'This is a simplified model for DC checks, not an authentic uA741 device model.': 'โมเดลอย่างง่ายสำหรับจำลอง DC ไม่ใช่โมเดล uA741 จริงจากผู้ผลิต',
+  'Changed Op-Amp to Generic Op-Amp DC approximation.': 'เปลี่ยนเป็นโมเดล Generic Op-Amp สำหรับจำลอง DC แล้ว',
+  'Op-Amp example loaded. Generic Op-Amp DC simulation is available (approximate model).': 'เปิดตัวอย่าง Op-Amp แล้ว สามารถจำลอง DC ด้วย Generic Op-Amp (โมเดลประมาณค่า) ได้',
+
   'Add a resistor, capacitor, inductor or voltage source.': 'กรุณาเพิ่มตัวต้านทาน ตัวเก็บประจุ ตัวเหนี่ยวนำ หรือแหล่งจ่ายแรงดัน',
   'Add Ground (node 0) to the circuit.': 'กรุณาเพิ่มกราวด์ (โหนด 0) ให้กับวงจร',
   'Unsupported project version.': 'เวอร์ชันของไฟล์โปรเจกต์ยังไม่รองรับ',
@@ -157,6 +163,15 @@ export const thai: Record<string, string> = {
 };
 
 const dynamic: [RegExp, (match: RegExpMatchArray) => string][] = [
+  [/^(.+): Generic Op-Amp is an approximate rail-limited DC model, NOT a validated uA741 model\.$/, m =>
+    `${m[1]}: ใช้ Generic Op-Amp ซึ่งเป็นโมเดล DC แบบประมาณค่าและจำกัดแรงดันตามไฟเลี้ยง ไม่ใช่โมเดล uA741 ของผู้ผลิต`],
+  [/^(.+): Unsupported Op-Amp model "(.+)"\. Select "Generic Op-Amp" in Properties, or import a verified vendor SPICE model \(not supported yet\)\.$/, m =>
+    `${m[1]}: โมเดล Op-Amp "${m[2]}" ยังจำลองไม่ได้ ให้เลือกอุปกรณ์และกดใช้ Generic Op-Amp ในคุณสมบัติ (โมเดลของผู้ผลิตยังไม่รองรับ)`],
+  [/^(.+): Both Op-Amp supply pins are on the same net\.$/, m =>
+    `${m[1]}: ขาไฟเลี้ยงบวกและลบของ Op-Amp เชื่อมเน็ตเดียวกัน`],
+  [/^(.+): Op-Amp inputs are connected to the same net\.$/, m =>
+    `${m[1]}: ขาอินพุต Op-Amp ทั้งสองเชื่อมเน็ตเดียวกัน`],
+
   [/^Placed (.+)\.$/, m => `วางอุปกรณ์ ${m[1]} แล้ว`],
   [/^Simulation failed: (.+)$/, m => `จำลองวงจรไม่สำเร็จ: ${m[1]}`],
   [/^Project loaded \(v(.+)\)\.$/, m => `เปิดโปรเจกต์เวอร์ชัน ${m[1]} แล้ว`],

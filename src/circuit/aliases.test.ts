@@ -57,3 +57,19 @@ test('Editable Op-Amp example has true supply aliases, ground and junction topol
   assert.ok(analysis.netlist.endsWith('.op\n.end\n'));
   assert.deepEqual(analysis.issues.filter((issue) => issue.severity === 'error'), []);
 });
+
+test('Old saved uA741 symbol is not silently simulated as a vendor model', () => {
+  const project = opAmpExampleProject();
+  const op = project.components.find((component) => component.id === 'U1')!;
+  op.value = 'uA741 (symbol)';
+  const fromSaved = parseProject(JSON.stringify(project));
+  const blocked = analyzeCircuit(fromSaved);
+  assert.equal(blocked.netlist, null);
+  assert.ok(blocked.issues.some((issue) => issue.severity === 'error' &&
+    issue.message.includes('Unsupported Op-Amp model')));
+  fromSaved.components.find((component) => component.id === 'U1')!.value = 'Generic Op-Amp';
+  const approximate = analyzeCircuit(fromSaved);
+  assert.ok(approximate.netlist?.includes('XOP1 '));
+  assert.ok(approximate.issues.some((issue) => issue.severity === 'warning' &&
+    issue.message.includes('NOT a validated uA741')));
+});

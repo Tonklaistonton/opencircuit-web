@@ -1217,7 +1217,7 @@ function App() {
                                 <td><strong>{node === '0' ? tr('Node 0 (GND)') : node}</strong></td>
                                 <td className="num-cell">{volt.toFixed(4)}</td>
                                 <td className="num-cell" style={{color: '#0f766e'}}>{formatEngineering(volt, 'V')}</td>
-                                <td style={{color: '#64748b', fontSize: 11}}>{nodePinsMap.get(node)?.join(', ') ?? '—'}</td>
+                                <td style={{color: '#64748b', fontSize: 11}}>{(nodePinsMap.get(node) ?? nodePinsMap.get(node.toUpperCase()))?.join(', ') ?? '—'}</td>
                               </tr>
                             ))}
                         </tbody>
@@ -1290,6 +1290,25 @@ function App() {
                   if (event.key === 'Enter') event.currentTarget.blur();
                 }}
               />
+              {selectedComponent.kind === 'O' && (
+                <div className="opamp-model-note">
+                  <strong>{tr('Op-Amp Model')}</strong>
+                  <p>{tr('This is a simplified model for DC checks, not an authentic uA741 device model.')}</p>
+                  {selectedComponent.value.trim() !== 'Generic Op-Amp' && (
+                    <button type="button" onClick={() => {
+                      commit((current) => ({
+                        ...current,
+                        components: current.components.map((item) => item.id === selectedComponent.id
+                          ? {...item, value: 'Generic Op-Amp'} : item),
+                      }));
+                      setValueDraft(null);
+                      valueDraftRef.current = null;
+                      valueStart.current = null;
+                      setMessage('Changed Op-Amp to Generic Op-Amp DC approximation.');
+                    }}>{tr('Use Generic Op-Amp (DC Approximation)')}</button>
+                  )}
+                </div>
+              )}
               <p style={{color: '#64748b', fontSize: 12}}>
                 {tr('Rotation:')} {project.schematic[selectedComponent.id]?.rotation ?? 0}°
               </p>
