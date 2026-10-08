@@ -123,6 +123,55 @@ test('Voltage Source polarity reverses when pins are swapped', () => {
   assert.ok(res.netlist.includes('V1 0 n1 DC 10'));
 });
 
+test('Wires crossing geometrically on canvas without a shared pin/wire do not connect electrically', () => {
+  // Circuit 1: V1 -> R1 -> G1 (runs horizontally across x=100..300 at y=100)
+  // Circuit 2: V2 -> R2 -> G1 (runs vertically across y=0..200 at x=200)
+  // Geometrically, the wire from V1:1 to R1:0 crosses the wire from V2:1 to R2:0 in 2D space.
+  const v1 = createComponent('V', 'V1'); v1.value = '5V';
+  const r1 = createComponent('R', 'R1'); r1.value = '1kΩ';
+  const v2 = createComponent('V', 'V2'); v2.value = '12V';
+  const r2 = createComponent('R', 'R2'); r2.value = '2kΩ';
+  const g1 = createComponent('G', 'G1');
+
+  const crossingCircuit: Project = {
+    version: 2,
+    components: [v1, r1, v2, r2, g1],
+    wires: [
+      // Subcircuit 1
+      {id: 'w1', from: 'V1:0', to: 'G1:0'},
+      {id: 'w2', from: 'V1:1', to: 'R1:0'},
+      {id: 'w3', from: 'R1:1', to: 'G1:0'},
+      // Subcircuit 2 (completely separate wire paths)
+      {id: 'w4', from: 'V2:0', to: 'G1:0'},
+      {id: 'w5', from: 'V2:1', to: 'R2:0'},
+      {id: 'w6', from: 'R2:1', to: 'G1:0'},
+    ],
+    schematic: {
+      // Horizontal run
+      V1: {x: 100, y: 100, rotation: 0},
+      R1: {x: 300, y: 100, rotation: 0},
+      // Vertical run crossing (200, 100)
+      V2: {x: 200, y: 20, rotation: 90},
+      R2: {x: 200, y: 180, rotation: 90},
+      G1: {x: 200, y: 280, rotation: 0},
+    },
+  };
+
+  const nets = extractNets(crossingCircuit);
+  const v1PosNode = nets.nodeByPin.get('V1:1');
+  const v2PosNode = nets.nodeByPin.get('V2:1');
+
+  // Must be two distinct electrical nodes (not shorted together despite crossing on screen)
+  assert.ok(v1PosNode && v2PosNode);
+  assert.notEqual(v1PosNode, v2PosNode, 'Crossing wires must not merge into the same electrical net');
+
+  const analysis = analyzeCircuit(crossingCircuit);
+  assert.deepEqual(analysis.issues, []);
+  assert.ok(analysis.netlist);
+  assert.ok(analysis.netlist.includes(`V1 ${v1PosNode} 0 DC 5`));
+  assert.ok(analysis.netlist.includes(`V2 ${v2PosNode} 0 DC 12`));
+});
+
 test('Net Extraction merges connected pins into common electrical nodes', () => {
   const circuit = createTestCircuit(['V', 'R', 'R', 'G'], [
     ['V1:0', 'G4:0'],

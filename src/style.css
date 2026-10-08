@@ -96,6 +96,8 @@ dialog::backdrop{background:#0f172a80;backdrop-filter:blur(2px)}
 .netlist-dialog{width:min(720px,calc(100vw - 32px))}
 .netlist-dialog pre{white-space:pre;overflow:auto;background:#f1f5f9;padding:14px;border-radius:8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 
+.junction-dot circle{filter:drop-shadow(0 1px 2px rgba(0,0,0,.25))}
+
 @media(max-width:960px){
   main{grid-template-columns:180px minmax(0,1fr);height:auto;min-height:calc(100vh - 64px)}
   .workspace{min-height:550px}

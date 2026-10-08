@@ -91,3 +91,42 @@ npm run build
 - **v0.4:** Supports DC Operating Point (`.op`) simulation.
 - **v0.5 (Planned):** Transient analysis (`.tran`), AC frequency response (`.ac`), and interactive waveform charts.
 - **T-junctions:** Wires connect pin-to-pin; intermediate branch junctions on wires are planned for a future layout milestone.
+
+## User Communication Rules (Mandatory)
+
+### Language
+- Always communicate with the user in Thai.
+- All explanations, questions, progress summaries, implementation reports, and troubleshooting instructions must be written in Thai.
+- Technical terms, code, filenames, API names, and command names may remain in English where appropriate.
+- Use clear and beginner-friendly Thai explanations.
+
+### Asking Questions
+- **Whenever you need to ask the user a question, you MUST use the `AskUserQuestion` tool if it is available.**
+- All questions submitted through `AskUserQuestion` MUST be written in Thai.
+- All answer choices, descriptions, and clarification text in the tool MUST also be written in Thai.
+- Do not ask clarification questions through ordinary chat messages when `AskUserQuestion` is available.
+- Ask only questions that are necessary for implementation decisions or missing requirements.
+- Prefer presenting 2–4 clear choices with a recommended default when the tool supports choices.
+- Do not ask the user to make minor technical decisions that can be resolved safely from the existing code or project requirements.
+- If `AskUserQuestion` is unavailable, ask a concise question in Thai through the normal conversation.
+
+### Project Direction
+- OpenCircuit Web Studio is a GUI-first, 2D electronic schematic editor and circuit simulator.
+- Prioritize a traditional 2D schematic interface with electronic symbols, orthogonal wires, junction dots, grid snapping, and intuitive mouse interactions.
+- Do not introduce 3D rendering, 3D components, or Breadboard View unless the user explicitly requests them.
+- Users must be able to design and simulate circuits through the GUI without manually writing SPICE commands.
+- Preserve existing functionality and test changes before reporting completion.
+
+### Before Making Major Changes
+- Read `CLAUDE.md` and inspect the current codebase.
+- If requirements are ambiguous and different choices would materially change the implementation, ask the user through `AskUserQuestion` in Thai before proceeding.
+- If requirements are clear, proceed without unnecessary questions.
+- Never claim a feature has been tested unless the relevant test was actually executed.
+- Clearly distinguish implemented features, tested features, and planned features.
+
+### Reporting Results
+- Summarize completed work in Thai.
+- List important files changed.
+- Report actual test commands and results.
+- Explain remaining limitations and the next recommended step.
+- Be transparent about anything that could not be verified.

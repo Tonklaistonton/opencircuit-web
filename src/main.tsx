@@ -60,6 +60,7 @@ function App() {
   const {value: project, commit, undo, redo, reset, canUndo, canRedo} = useHistory<Project>(starterProject());
   const [tool, setTool] = useState<Tool>('select');
   const [pending, setPending] = useState<string | null>(null);
+  const [wireHoverPos, setWireHoverPos] = useState<{x: number; y: number} | null>(null);
   const [selected, setSelected] = useState<Selection>(null);
   const [preview, setPreview] = useState<{id: string; placement: Placement} | null>(null);
   const [viewport, setViewport] = useState({x: 0, y: 0, zoom: 1});
@@ -151,6 +152,7 @@ function App() {
       setMessage('Wire connected.');
     }
     setPending(null);
+    setWireHoverPos(null);
   }
 
   function remove() {
@@ -166,6 +168,7 @@ function App() {
         wires: val.wires.filter((w) => !pins.has(w.from) && !pins.has(w.to))};
     });
     setPending(null);
+    setWireHoverPos(null);
     setSelected(null);
     drag.current = null;
     previewRef.current = null;
@@ -240,6 +243,7 @@ function App() {
     reset({version: 2, components: [], wires: [], schematic: {}});
     setSelected(null);
     setPending(null);
+    setWireHoverPos(null);
     setSimStatus('idle');
     setSimResult(null);
     setSimError(null);
@@ -253,17 +257,23 @@ function App() {
       if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA'].includes(target.tagName))) return;
       if (event.key === 'Escape') {
         drag.current = null; previewRef.current = null; setPreview(null);
-        setPending(null); setTool('select'); setMessage('Cancelled.');
+        setPending(null); setWireHoverPos(null); setTool('select'); setMessage('Cancelled.');
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) redo(); else undo();
         setSelected(null);
         setPending(null);
+        setWireHoverPos(null);
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
-        event.preventDefault(); redo(); setSelected(null); setPending(null);
+        event.preventDefault(); redo(); setSelected(null); setPending(null); setWireHoverPos(null);
       } else if (event.key === 'Delete' || event.key === 'Backspace') {
         if (selected) { event.preventDefault(); remove(); }
+      } else if (event.key === 'r' || event.key === 'R') {
+        if (selected && selected.type === 'component') {
+          event.preventDefault();
+          rotate();
+        }
       }
     }
     window.addEventListener('keydown', onKey);
@@ -298,6 +308,7 @@ function App() {
       setValueDraft(null);
       setSelected(null);
       setPending(null);
+      setWireHoverPos(null);
       setSimStatus('idle');
       setSimResult(null);
       setSimError(null);
@@ -318,6 +329,26 @@ function App() {
       if (position) pinLocations.set(pin, position);
     }
   }
+
+  // Junction Dots: coordinates where 2 or more wire connections meet
+  const junctionCounts = new Map<string, {x: number; y: number; count: number}>();
+  for (const wire of project.wires) {
+    const pA = pinLocations.get(wire.from);
+    const pB = pinLocations.get(wire.to);
+    if (pA) {
+      const key = `${pA.x},${pA.y}`;
+      const entry = junctionCounts.get(key) || {x: pA.x, y: pA.y, count: 0};
+      entry.count += 1;
+      junctionCounts.set(key, entry);
+    }
+    if (pB) {
+      const key = `${pB.x},${pB.y}`;
+      const entry = junctionCounts.get(key) || {x: pB.x, y: pB.y, count: 0};
+      entry.count += 1;
+      junctionCounts.set(key, entry);
+    }
+  }
+  const junctions = Array.from(junctionCounts.values()).filter((j) => j.count >= 2);
   const viewWidth = 900 / viewport.zoom;
   const viewHeight = 540 / viewport.zoom;
 
@@ -538,7 +569,8 @@ function App() {
             • <b>Place:</b> Drag or click component, then canvas.<br/>
             • <b>Wire:</b> Click two pin circles.<br/>
             • <b>Pan:</b> Drag canvas with middle-click or Pan tool.<br/>
-            • <b>Rotate:</b> Select component, press Rotate 90°.
+            • <b>Rotate:</b> Press 'R' or click Rotate 90°.<br/>
+            • <b>Cancel:</b> Right-click or press Esc.
           </div>
         </aside>
 
@@ -570,6 +602,21 @@ function App() {
                 const location = point(event);
                 if (location) addComponent(kind as Kind, location);
               }}
+              onWheel={(event) => {
+                event.preventDefault();
+                const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+                zoomBy(factor);
+              }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                if (pending) {
+                  setPending(null);
+                  setWireHoverPos(null);
+                  setMessage('Wiring cancelled.');
+                } else if (selected) {
+                  setSelected(null);
+                }
+              }}
               onPointerDown={(event) => {
                 if (event.button === 1 || (tool === 'pan' && event.button === 0)) {
                   event.preventDefault();
@@ -598,6 +645,10 @@ function App() {
                 } else if (tool === 'select') setSelected(null);
               }}
               onPointerMove={(event) => {
+                if (tool === 'wire' && pending) {
+                  const location = point(event);
+                  if (location) setWireHoverPos({x: snap(location.x), y: snap(location.y)});
+                }
                 const current = drag.current;
                 if (!current || current.pointerId !== event.pointerId) return;
                 if (current.type === 'pan') {
@@ -630,12 +681,17 @@ function App() {
               </defs>
               <rect className="grid-hit" x={viewport.x} y={viewport.y} width={viewWidth} height={viewHeight} fill="url(#dots)" />
 
-              {/* Wires */}
+              {/* Orthogonal 2D Wires */}
               {project.wires.map((wire) => {
                 const a = pinLocations.get(wire.from);
                 const b = pinLocations.get(wire.to);
                 if (!a || !b) return null;
                 const isSelected = selectedWire?.id === wire.id;
+                const wirePath = a.x === b.x
+                  ? `M${a.x} ${a.y} V${b.y}`
+                  : a.y === b.y
+                  ? `M${a.x} ${a.y} H${b.x}`
+                  : `M${a.x} ${a.y} H${b.x} V${b.y}`;
                 return (
                   <g
                     key={wire.id}
@@ -645,17 +701,51 @@ function App() {
                       setSelected({type: 'wire', id: wire.id});
                     }}
                   >
-                    <path d={`M${a.x} ${a.y} H${b.x} V${b.y}`} stroke="transparent" strokeWidth="14" fill="none" />
+                    <path d={wirePath} stroke="transparent" strokeWidth="14" fill="none" />
                     <path
-                      d={`M${a.x} ${a.y} H${b.x} V${b.y}`}
+                      d={wirePath}
                       stroke={isSelected ? '#f59e0b' : '#0d9488'}
                       strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
                       fill="none"
                       pointerEvents="none"
                     />
                   </g>
                 );
               })}
+
+              {/* Junction Dots: Rendered strictly where 2 or more wire connections meet */}
+              {junctions.map((j, idx) => (
+                <g key={`junc-${idx}`} className="junction-dot" pointerEvents="none">
+                  <circle cx={j.x} cy={j.y} r="4.5" fill="#0d9488" stroke="#ffffff" strokeWidth="1.5" />
+                </g>
+              ))}
+
+              {/* Rubber-band Orthogonal Wire Preview */}
+              {tool === 'wire' && pending && wireHoverPos && (() => {
+                const start = pinLocations.get(pending);
+                if (!start) return null;
+                const previewPath = start.x === wireHoverPos.x
+                  ? `M${start.x} ${start.y} V${wireHoverPos.y}`
+                  : start.y === wireHoverPos.y
+                  ? `M${start.x} ${start.y} H${wireHoverPos.x}`
+                  : `M${start.x} ${start.y} H${wireHoverPos.x} V${wireHoverPos.y}`;
+                return (
+                  <g pointerEvents="none">
+                    <path
+                      d={previewPath}
+                      stroke="#f59e0b"
+                      strokeWidth="2.5"
+                      strokeDasharray="5 4"
+                      fill="none"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <circle cx={wireHoverPos.x} cy={wireHoverPos.y} r="5" fill="#f59e0b" opacity="0.85" />
+                  </g>
+                );
+              })()}
 
               {/* Components */}
               {project.components.map((component) => {
