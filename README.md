@@ -1,6 +1,19 @@
-# OpenCircuit Web Studio v0.4 — GUI-First Circuit Simulation
+# OpenCircuit Studio — OrCAD Modernized CAD Editor (v0.4 simulation base)
 
 A beginner-friendly browser-based circuit design and SPICE simulation application with a modern 2D schematic editor, electrical net extraction, and Python FastAPI + ngspice simulation backend.
+
+
+## OrCAD Modernized — Current CAD editor additions (October 2026)
+The app now boots into an **editable Op-Amp schematic example**, rather than the old four-component starter view. Use **File → Open RC Starter Example** for the legacy circuit, or **New** for a blank schematic.
+
+- **Modern CAD chrome:** File / Edit / Place / View / PSpice menus, vertical tool rail, project explorer, component search, Dark/Light toggle and CAD sheet with border/title block.
+- **Multi-pin symbol:** Generic uA741-style Op-Amp (IN−, IN+, OUT, V+, V−). Pin positions rotate correctly; wiring and net extraction understand all pins. This symbol is **schematic only** until a verified SPICE op-amp model is implemented; trying to simulate it displays a clear blocking validation error.
+- **Wire routing:** choose Wire; click a pin, existing wire, or empty grid to start. Click grid points to lay orthogonal bends. Click a pin/existing wire to finish and create a real T-junction when needed. Double-click empty grid to finish with a dangling electrical endpoint. Press Esc or right-click to cancel. Select a wire, double-click a straight segment to add an editable bend, and drag orange handles to reroute.
+- **Net Alias:** select wire and edit alias in Properties, or select a component and edit aliases per pin. Pins with the same valid alias are connected electrically even without a drawn wire. Aliases appear on the schematic.
+- **Electrical integrity:** explicit junction endpoints are stored in optional `junctions` along with optional `netAliases` in backwards-compatible v2 project JSON. Wire intersections without an explicit junction **do not** short nets; save/open supports new data.
+- **Testing:** `npm test` for model/routing/aliases, `npm run test:backend` for Python safety and backend tests, `npm run build` for TypeScript/Vite.
+
+**Not yet implemented:** a verified uA741 transistor-level/behavioral SPICE model, importable symbol/model libraries, true multiple schematic sheets, comprehensive ERC, advanced routing operations. Do not conflate UI/schematic drawing with successful simulation of an op-amp.
 
 ## Requirements
 - **Frontend:** Node.js 22.12+ (supports built-in TypeScript test runner)
@@ -25,7 +38,7 @@ Open the URL shown by Vite (typically http://localhost:5173).
 
 ## Testing and Verification
 ```bash
-# Run Frontend Node.js unit tests (14 test cases)
+# Run Frontend Node.js unit tests (CAD model, junctions, aliases and routes)
 npm test
 
 # Run Backend Python test suite (4 test cases)
@@ -90,7 +103,7 @@ npm run build
 ## Current Limitations & Next Steps (v0.5)
 - **v0.4:** Supports DC Operating Point (`.op`) simulation.
 - **v0.5 (Planned):** Transient analysis (`.tran`), AC frequency response (`.ac`), and interactive waveform charts.
-- **T-junctions:** Wires connect pin-to-pin; intermediate branch junctions on wires are planned for a future layout milestone.
+- **T-junctions:** Explicit electrical junctions and branching from an existing wire are implemented. Geometric crossings stay disconnected unless intentionally joined.
 
 ## User Communication Rules (Mandatory)
 
@@ -130,3 +143,10 @@ npm run build
 - Report actual test commands and results.
 - Explain remaining limitations and the next recommended step.
 - Be transparent about anything that could not be verified.
+
+## ภาษาไทย / English UI
+- OpenCircuit เปิดหน้าใหม่เป็น **ภาษาไทย** โดยค่าเริ่มต้น และมีปุ่ม **EN · English** บน Toolbar เพื่อสลับเป็นอังกฤษ
+- เมื่อเลือกภาษาอังกฤษ ปุ่มเปลี่ยนเป็น **TH · ไทย** กดเพื่อกลับมาใช้ภาษาไทยได้ทันทีโดยไม่ต้องโหลดหน้าใหม่
+- ภาษาและธีมเก็บไว้ใน Browser Local Storage (`opencircuit-language`, `opencircuit-theme`)
+- แปลเฉพาะข้อความ UI เมนู เครื่องมือ Properties และคำเตือน; ชื่อ Net (เช่น VCC/VOUT), ค่าอุปกรณ์, SPICE Netlist และ JSON ยังคงเดิมเสมอ
+- การแปล UI อยู่ที่ `src/i18n.ts`; เพิ่มคำแปลโดยเพิ่ม key ภาษาอังกฤษและคำภาษาไทยใน `thai`

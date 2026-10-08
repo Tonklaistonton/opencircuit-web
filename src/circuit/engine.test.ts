@@ -57,7 +57,7 @@ test('RC Low-pass filter (V1=5V, R1=1kΩ, C1=100nF) generates valid netlist with
   assert.ok(analysis.netlist !== null);
   assert.equal(
     analysis.netlist,
-    'OpenCircuit schematic\nC1 n1 0 1e-7\nR1 n2 n1 1000\nV1 n2 0 DC 5\n.end\n',
+    'OpenCircuit schematic\nC1 n1 0 1e-7\nR1 n2 n1 1000\nV1 n2 0 DC 5\n.op\n.end\n',
   );
 });
 

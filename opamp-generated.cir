@@ -1,0 +1,15 @@
+OpenCircuit schematic
+XOP1 n2 n3 VCC VEE VOUT OC_OPAMP
+R1 n1 n2 1000
+R2 n3 VOUT 2000
+R3 0 n3 1000
+V1 n1 0 DC 1
+V2 VCC 0 DC 15
+V3 0 VEE DC 15
+.subckt OC_OPAMP INP INM VP VN OUT
+Bdrv core 0 V=min(max(100000*(v(INP)-v(INM)),v(VN)+1.5),v(VP)-1.5)
+Rout core OUT 50
+Rin INP INM 1e9
+.ends OC_OPAMP
+.op
+.end

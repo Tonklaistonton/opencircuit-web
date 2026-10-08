@@ -1,19 +1,29 @@
 import {createComponent} from './model.ts';
 import type {Kind, Project} from './model.ts';
 
-export type CircuitTopology = Pick<Project, 'components' | 'wires'>;
+export type CircuitTopology = Pick<Project, 'components' | 'wires'> & Partial<Pick<Project, 'junctions' | 'netAliases'>>;
 export type Net = {name: string; pins: string[]};
 export type Nets = {nets: Net[]; nodeByPin: Map<string, string>};
 export type Issue = {severity: 'error' | 'warning'; message: string};
 export type Analysis = {nets: Net[]; issues: Issue[]; netlist: string | null};
 
+// Built-in finite-gain, rail-limited behavioral op-amp (DC approximation, not a vendor uA741 model).
+// This exact block is allowlisted independently by the Python simulation backend.
+export const GENERIC_OPAMP_MODEL = [
+  '.subckt OC_OPAMP INP INM VP VN OUT',
+  'Bdrv core 0 V=min(max(100000*(v(INP)-v(INM)),v(VN)+1.5),v(VP)-1.5)',
+  'Rout core OUT 50',
+  'Rin INP INM 1e9',
+  '.ends OC_OPAMP',
+].join('\n');
+
 const prefixes: Record<string, number> = {p: 1e-12, n: 1e-9, u: 1e-6, 'µ': 1e-6,
   'μ': 1e-6, m: 1e-3, k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12};
-const units: Record<Exclude<Kind, 'G'>, string[]> = {
+const units: Record<Exclude<Kind, 'G' | 'O'>, string[]> = {
   R: ['', 'Ω', 'Ohm', 'ohms'], C: ['', 'F'], L: ['', 'H'], V: ['', 'V'],
 };
 
-export function parseValue(kind: Exclude<Kind, 'G'>, value: string): number | null {
+export function parseValue(kind: Exclude<Kind, 'G' | 'O'>, value: string): number | null {
   const match = /^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(meg|[pnuµμmkKMGT]?)\s*(Ω|Ohm|ohms|F|H|V)?\s*$/i.exec(value);
   if (!match) return null;
   const [, amount, rawPrefix, rawUnit = ''] = match;
@@ -23,14 +33,14 @@ export function parseValue(kind: Exclude<Kind, 'G'>, value: string): number | nu
   return Number.isFinite(number) && (kind === 'V' || number > 0) ? Number(number.toPrecision(15)) : null;
 }
 
-// ponytail: wires join pin IDs only; screen crossings and bends are not junctions until the schema adds them.
+// Explicit junction endpoints are electrical topology; geometric wire crossings remain disconnected.
 export function extractNets(circuit: CircuitTopology): Nets {
   const pins = new Map<string, string>();
   const parent = new Map<string, string>();
   const names = new Set<string>();
   for (const component of circuit.components) {
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(component.id) || names.has(component.id) ||
-      !['R', 'C', 'L', 'V', 'G'].includes(component.kind) ||
+      !['R', 'C', 'L', 'V', 'G', 'O'].includes(component.kind) ||
       component.pins.join('|') !== createComponent(component.kind, component.id).pins.join('|'))
       throw new Error(`Invalid component or pins: ${component.id}`);
     names.add(component.id);
@@ -39,6 +49,12 @@ export function extractNets(circuit: CircuitTopology): Nets {
       parent.set(pin, pin);
       pins.set(pin, component.id);
     }
+  }
+  for (const id of Object.keys(circuit.junctions ?? {})) {
+    if (!/^J[0-9]+$/.test(id) || parent.has(id) || names.has(id)) throw new Error(`Invalid or duplicate junction: ${id}`);
+    const position = circuit.junctions?.[id];
+    if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) throw new Error(`Invalid junction coordinates: ${id}`);
+    parent.set(id, id);
   }
   const root = (pin: string): string => {
     const parentPin = parent.get(pin);
@@ -64,6 +80,14 @@ export function extractNets(circuit: CircuitTopology): Nets {
     edges.add(edge);
     join(wire.from, wire.to);
   }
+  const aliasEndpoints = new Map<string, string>();
+  for (const [endpoint, alias] of Object.entries(circuit.netAliases ?? {})) {
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(alias)) throw new Error(`Invalid net alias: ${alias}`);
+    const normalized = alias.toUpperCase();
+    const previous = aliasEndpoints.get(normalized);
+    if (previous) join(previous, endpoint);
+    else {root(endpoint); aliasEndpoints.set(normalized, endpoint);}
+  }
   const grounds = circuit.components.filter((component) => component.kind === 'G');
   for (let i = 1; i < grounds.length; i++) join(grounds[0].pins[0], grounds[i].pins[0]);
   const groups = new Map<string, string[]>();
@@ -74,13 +98,26 @@ export function extractNets(circuit: CircuitTopology): Nets {
   const ordered = [...groups.values()].map((group) => group.sort())
     .sort((a, b) => a[0].localeCompare(b[0], 'en'));
   const groundRoot = grounds.length ? root(grounds[0].pins[0]) : null;
+  const aliasByRoot = new Map<string, string>();
+  for (const [endpoint, alias] of Object.entries(circuit.netAliases ?? {})) {
+    const id = root(endpoint);
+    const upper = alias.toUpperCase();
+    const existing = aliasByRoot.get(id);
+    if (existing && existing !== upper) throw new Error(`Conflicting net aliases: ${existing} / ${upper}`);
+    aliasByRoot.set(id, upper);
+  }
+  const reservedAliases = new Set(aliasByRoot.values());
   const nodeByPin = new Map<string, string>();
   let next = 1;
   const nets = ordered.map((group) => {
-    const name = groundRoot && root(group[0]) === groundRoot ? '0' : `n${next++}`;
+    const id = root(group[0]);
+    let name = groundRoot && id === groundRoot ? '0' : aliasByRoot.get(id);
+    if (!name) {
+      do {name = `n${next++}`;} while (reservedAliases.has(name.toUpperCase()));
+    }
     group.forEach((pin) => nodeByPin.set(pin, name));
     return {name, pins: group};
-  }).sort((a, b) => a.name === '0' ? -1 : b.name === '0' ? 1 : Number(a.name.slice(1)) - Number(b.name.slice(1)));
+  }).sort((a, b) => a.name === '0' ? -1 : b.name === '0' ? 1 : a.name.localeCompare(b.name, 'en', {numeric: true}));
   return {nets, nodeByPin};
 }
 
@@ -95,6 +132,10 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
   if (!circuit.components.some((component) => component.kind === 'G'))
     issues.push({severity: 'error', message: 'Add Ground (node 0) to the circuit.'});
   const connected = new Set(circuit.wires.flatMap((wire) => [wire.from, wire.to]));
+  for (const label of new Set(Object.values(circuit.netAliases ?? {}).map((name) => name.toUpperCase()))) {
+    const members = Object.entries(circuit.netAliases ?? {}).filter(([, name]) => name.toUpperCase() === label);
+    if (members.length > 1) members.forEach(([endpoint]) => connected.add(endpoint));
+  }
   for (const component of circuit.components) {
     if (component.kind === 'G') {
       if (!connected.has(component.pins[0])) issues.push({severity: 'warning', message: `${component.id}: Ground is not connected.`});
@@ -102,6 +143,21 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
     }
     for (const pin of component.pins) {
       if (!connected.has(pin)) issues.push({severity: 'error', message: `${pin}: Pin is not connected.`});
+    }
+    if (component.kind === 'O') {
+      if (component.value.trim() !== 'Generic Op-Amp') {
+        issues.push({severity: 'error', message: `${component.id}: Unsupported Op-Amp model "${component.value}". Select "Generic Op-Amp" in Properties, or import a verified vendor SPICE model (not supported yet).`});
+      } else {
+        issues.push({severity: 'warning', message: `${component.id}: Generic Op-Amp is an approximate rail-limited DC model, NOT a validated uA741 model.`});
+      }
+      const inputMinus = nodeByPin.get(component.pins[0]);
+      const inputPlus = nodeByPin.get(component.pins[1]);
+      const positiveSupply = nodeByPin.get(component.pins[3]);
+      const negativeSupply = nodeByPin.get(component.pins[4]);
+      if (inputMinus === inputPlus) issues.push({severity: 'warning', message: `${component.id}: Op-Amp inputs are connected to the same net.`});
+      if (positiveSupply === negativeSupply)
+        issues.push({severity: 'error', message: `${component.id}: Both Op-Amp supply pins are on the same net.`});
+      continue;
     }
     if (nodeByPin.get(component.pins[0]) === nodeByPin.get(component.pins[1]))
       issues.push({severity: 'error', message: `${component.id}: Both pins are on the same node (shorted).`});
@@ -115,6 +171,17 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
     changed = false;
     for (const component of circuit.components) {
       if (component.kind === 'G' || component.kind === 'C') continue;
+      if (component.kind === 'O') {
+        // The built-in behavioral source references ground and both supply rails.
+        const output = nodeByPin.get(component.pins[2]);
+        const supplyPlus = nodeByPin.get(component.pins[3]);
+        const supplyMinus = nodeByPin.get(component.pins[4]);
+        if (output && supplyPlus && supplyMinus && reached.has(supplyPlus) &&
+          reached.has(supplyMinus) && !reached.has(output)) {
+          reached.add(output); changed = true;
+        }
+        continue;
+      }
       const a = nodeByPin.get(component.pins[0]);
       const b = nodeByPin.get(component.pins[1]);
       if (a && b && (reached.has(a) !== reached.has(b))) {
@@ -130,11 +197,19 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
   if (issues.some((issue) => issue.severity === 'error')) return {nets, issues, netlist: null};
   const components = [...circuit.components].filter((component) => component.kind !== 'G')
     .sort((a, b) => a.kind.localeCompare(b.kind, 'en') || a.id.localeCompare(b.id, 'en'));
-  const counts: Record<Exclude<Kind, 'G'>, number> = {R: 0, C: 0, L: 0, V: 0};
+  const counts: Record<Exclude<Kind, 'G'>, number> = {R: 0, C: 0, L: 0, V: 0, O: 0};
   const lines = ['OpenCircuit schematic'];
   for (const component of components) {
     if (component.kind === 'G') continue;
     const kind = component.kind;
+    if (kind === 'O') {
+      const pins = component.pins.map((pin) => nodeByPin.get(pin));
+      if (pins.some((node) => !node)) throw new Error('Circuit analysis lost an Op-Amp pin.');
+      // Symbol pin order: IN-, IN+, OUT, V+, V-.
+      // SPICE macro pins: INP, INM, VP, VN, OUT.
+      lines.push(`XOP${++counts.O} ${pins[1]} ${pins[0]} ${pins[3]} ${pins[4]} ${pins[2]} OC_OPAMP`);
+      continue;
+    }
     const name = `${kind}${++counts[kind]}`;
     if (name !== component.id) lines.push(`* ${name} represents ${component.id}`);
     // In SPICE, V source syntax is V<name> <pos_node> <neg_node> DC <val>.
@@ -145,6 +220,7 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
     if (!a || !b || value === null) throw new Error('Circuit analysis lost a pin or value.');
     lines.push(`${name} ${a} ${b} ${kind === 'V' ? 'DC ' : ''}${value}`);
   }
-  lines.push('.end');
+  if (counts.O > 0) lines.push(...GENERIC_OPAMP_MODEL.split('\n'));
+  lines.push('.op', '.end');
   return {nets, issues, netlist: lines.join('\n') + '\n'};
 }

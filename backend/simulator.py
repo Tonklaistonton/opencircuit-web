@@ -18,6 +18,18 @@ MAX_NETLIST_BYTES = 64 * 1024
 MAX_NETLIST_LINES = 500
 TIMEOUT_SECONDS = 5.0
 
+# A single fixed, reviewed behavioral macro-model. No arbitrary SPICE model directives allowed.
+OPAMP_MACRO_LINES = (
+    ".subckt OC_OPAMP INP INM VP VN OUT",
+    "Bdrv core 0 V=min(max(100000*(v(INP)-v(INM)),v(VN)+1.5),v(VP)-1.5)",
+    "Rout core OUT 50",
+    "Rin INP INM 1e9",
+    ".ends OC_OPAMP",
+)
+OPAMP_INSTANCE_PATTERN = re.compile(
+    r"^XOP[1-9][0-9]{0,3}(?:\s+[A-Za-z0-9_]+){5}\s+OC_OPAMP$", re.IGNORECASE
+)
+
 ALLOWED_LINE_PATTERN = re.compile(
     r"^(\s*|"
     r"\*.*|"
@@ -95,24 +107,43 @@ def validate_netlist(netlist: str, sim_type: str = "op") -> Tuple[bool, Optional
         if forbidden.search(netlist):
             return False, "Netlist contains forbidden directives or characters."
 
+    # Only the complete, hardcoded op-amp macro is allowed; never accept user .model
+    # or arbitrary behavioral expressions from untrusted client netlists.
+    meaningful = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("*")]
+    begins = [i for i, line in enumerate(meaningful) if line.lower().startswith(".subckt")]
+    has_macro = False
+    if begins:
+        start = begins[0]
+        if len(begins) != 1 or tuple(meaningful[start:start + len(OPAMP_MACRO_LINES)]) != OPAMP_MACRO_LINES:
+            return False, "Unsupported or modified Op-Amp SPICE macro."
+        del meaningful[start:start + len(OPAMP_MACRO_LINES)]
+        has_macro = True
+
+    if not meaningful or meaningful[-1].lower() != ".end" or sum(
+        line.lower() == ".end" for line in meaningful
+    ) != 1:
+        return False, "Netlist must end with exactly one .end directive."
+
     has_component = False
-    has_end = False
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("*"):
-            continue
-        if not ALLOWED_LINE_PATTERN.match(stripped):
-            return False, f"Invalid or disallowed netlist statement: '{stripped}'"
-        first = stripped[0].upper()
-        if first in ("R", "C", "L", "V"):
+    has_opamp = False
+    has_op = False
+    for stripped in meaningful:
+        if OPAMP_INSTANCE_PATTERN.fullmatch(stripped):
+            has_opamp = True
             has_component = True
-        if stripped.lower() == ".end":
-            has_end = True
-
+            continue
+        if not ALLOWED_LINE_PATTERN.fullmatch(stripped):
+            return False, f"Invalid or disallowed netlist statement: '{stripped}'"
+        if stripped.lower() == ".op":
+            if has_op:
+                return False, "Only one .op directive is allowed."
+            has_op = True
+        if stripped[0].upper() in ("R", "C", "L", "V"):
+            has_component = True
+    if has_macro != has_opamp:
+        return False, "An Op-Amp instance requires the fixed OC_OPAMP SPICE macro."
     if not has_component:
         return False, "Netlist contains no components."
-
     return True, None
 
 

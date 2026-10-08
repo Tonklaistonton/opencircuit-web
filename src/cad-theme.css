@@ -1,0 +1,99 @@
+
+/* Modern CAD Workspace — dual theme design tokens */
+:root,[data-theme="dark"]{color-scheme:dark;--bg:#0b1019;--panel:#151d2a;--panel-alt:#1b2635;--surface:#202c3d;--canvas:#101a28;--text:#e8eef7;--muted:#98a9bd;--line:#304055;--accent:#43d6c1;--accent-soft:#123d3d;--accent-text:#7cf3df;--hover:#29394c;--input:#111a28;--shadow:0 10px 36px #02061155}
+[data-theme="light"]{color-scheme:light;--bg:#edf2f8;--panel:#ffffff;--panel-alt:#f5f8fc;--surface:#eaf0f6;--canvas:#fafcff;--text:#1b2b41;--muted:#63768d;--line:#d7e0eb;--accent:#087f89;--accent-soft:#ddf7f3;--accent-text:#076d75;--hover:#e7eff7;--input:#ffffff;--shadow:0 10px 30px #32465c16}
+body{background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,system-ui,sans-serif}
+.app{background:var(--bg);color:var(--text)}
+header{background:var(--panel);border-bottom:1px solid var(--line);min-height:66px;padding:10px 18px;box-shadow:0 2px 12px #00000013}
+.brand{color:var(--accent);font-size:19px;letter-spacing:-.5px}
+.brand span{color:var(--muted);font-size:12px;letter-spacing:0;border-left:1px solid var(--line);padding-left:10px;margin-left:4px}
+.workspace-pill{color:var(--accent-text);background:var(--accent-soft);border:1px solid var(--accent);border-radius:6px;padding:6px 9px;font-size:10px;font-weight:800;letter-spacing:.08em;white-space:nowrap}
+button{background:var(--panel-alt);border:1px solid var(--line);color:var(--text);border-radius:7px;transition:background .16s,border-color .16s}
+button:hover:not(:disabled){background:var(--hover);border-color:var(--accent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#071a20}
+.btn-primary:hover:not(:disabled){background:#69e8d6;color:#071a20}
+main{grid-template-columns:228px minmax(0,1fr) 270px;gap:9px;padding:9px;height:calc(100vh - 66px);min-height:580px}
+aside,.workspace{background:var(--panel);border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow)}
+aside{padding:14px;gap:7px}
+aside h3{color:var(--muted);font-size:10px;letter-spacing:.13em;margin:16px 0 6px}
+aside button{background:transparent;border-color:transparent;padding:10px 12px}
+aside button:hover:not(:disabled){background:var(--hover)}
+aside button.active{background:var(--accent-soft);color:var(--accent-text);border-color:var(--accent);font-weight:700}
+.component-symbol{color:var(--accent);font-family:ui-monospace,Consolas,monospace}
+.library-search{background:var(--input);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:10px;width:100%;font:inherit;font-size:12px;margin-bottom:5px}
+.library-search::placeholder{color:var(--muted)}
+.hint{color:var(--muted);font-size:11px;line-height:1.65;border-top:1px solid var(--line);padding-top:12px}
+.workspace-head{background:var(--panel-alt);border-bottom:1px solid var(--line);padding:9px 15px}
+.workspace-head strong{color:var(--text);font-size:13px}
+.document-dot{color:var(--accent);font-size:10px;margin-right:6px}
+.workspace-subtitle{color:var(--muted);font-weight:400}
+.workspace-controls span{color:var(--muted)}
+.canvas-container{background:var(--canvas)}
+.status{background:var(--panel-alt);border-top:1px solid var(--line);color:var(--muted)}
+.results-panel{background:var(--panel);border-color:var(--line)}
+.results-header{background:var(--panel-alt);border-color:var(--line);color:var(--text)}
+.tab-btn{color:var(--muted)}
+.tab-btn.active{background:var(--surface);color:var(--accent-text);box-shadow:none}
+.results-body{background:var(--panel);color:var(--text)}
+.results-card h4,.properties label{color:var(--muted)}
+.sim-table th{background:var(--panel-alt);color:var(--muted);border-color:var(--line)}
+.sim-table td{color:var(--text);border-color:var(--line)}
+.sim-table tr:hover td{background:var(--hover)}
+.properties p{color:var(--text)}
+.properties .muted{color:var(--muted)}
+.properties input{background:var(--input);border-color:var(--line);color:var(--text)}
+.properties .pin-nodes{background:var(--panel-alt);border-color:var(--line)}
+dialog{background:var(--panel);color:var(--text);border-color:var(--line);box-shadow:var(--shadow)}
+.dialog-head h2{color:var(--accent-text)}
+.sim-type-card{background:var(--panel-alt);border-color:var(--line)}
+.sim-type-card.selected{background:var(--accent-soft);border-color:var(--accent)}
+.sim-type-card.disabled{background:var(--surface)}
+.sim-type-card strong{color:var(--text)}
+.sim-type-card small{color:var(--muted)}
+.validation-box{background:var(--panel-alt);border-color:var(--line)}
+.validation-box h4{color:var(--muted)}
+.dialog-foot{border-color:var(--line)}
+.netlist-dialog pre{background:var(--input);color:var(--text)}
+@media(max-width:1050px){main{grid-template-columns:195px minmax(0,1fr)}.properties{grid-column:1/-1}}
+@media(max-width:650px){main{display:flex;flex-direction:column;height:auto}.workspace{min-height:540px}.actions{gap:5px}.workspace-pill{display:none}}
+
+/* OrCAD Capture-inspired application chrome: real commands, not dummy buttons */
+.cad-menu-bar{height:33px;display:flex;align-items:stretch;gap:1px;background:var(--panel-alt);border-bottom:1px solid var(--line);padding:0 12px;position:relative;z-index:20}
+.cad-menu{position:relative;font-size:12px;color:var(--text)}
+.cad-menu>summary{list-style:none;cursor:pointer;padding:8px 13px;user-select:none}
+.cad-menu>summary::-webkit-details-marker{display:none}
+.cad-menu[open]>summary,.cad-menu>summary:hover{background:var(--accent-soft);color:var(--accent-text)}
+.cad-menu-popover{position:absolute;top:100%;left:0;min-width:215px;background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:5px;box-shadow:var(--shadow);display:flex;flex-direction:column;z-index:30}
+.cad-menu-popover button{width:100%;border:0;text-align:left;justify-content:flex-start;background:transparent;border-radius:3px;padding:9px 12px;font-size:12px}
+.cad-menu-popover button:hover{background:var(--accent-soft)}
+.cad-tool-rail{display:flex;flex-direction:column;align-items:center;gap:5px;padding:9px 5px;background:var(--panel);border:1px solid var(--line);border-radius:7px;min-width:46px}
+.cad-tool-rail button{width:34px;height:34px;display:flex;align-items:center;justify-content:center;padding:0;font-size:16px;font-weight:700;background:transparent;border-color:transparent}
+.cad-tool-rail button.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-text)}
+.cad-tool-rail button:nth-child(4){margin-top:14px;border-top:1px solid var(--line)}
+main{grid-template-columns:46px 190px minmax(0,1fr) 245px;height:calc(100vh - 99px)}
+.workspace{border-radius:3px}
+.workspace-head{min-height:41px}
+@media(max-width:1150px){main{grid-template-columns:46px 180px minmax(0,1fr)}.properties{grid-column:2/-1}}
+@media(max-width:650px){main{display:grid;grid-template-columns:42px minmax(0,1fr);height:auto}.cad-tool-rail{grid-row:1 / 3}.tools{grid-column:2}.workspace{grid-column:2;min-height:530px}.properties{grid-column:2}.cad-menu-bar{overflow-x:auto;padding:0 4px}.cad-menu>summary{padding:8px}}
+
+.design-explorer{padding:9px 7px;background:var(--panel-alt);border:1px solid var(--line);border-radius:7px;display:flex;flex-direction:column;gap:5px;font-size:11px}
+.design-explorer .explorer-root{font-weight:700;color:var(--text)}
+.design-explorer .explorer-sheet{border:0;background:var(--accent-soft);color:var(--accent-text);font-weight:650;font-size:10px;line-height:1.3;white-space:normal;text-align:left;padding:7px}
+.design-explorer small{color:var(--muted);font-size:10px}
+.properties .pin-nodes>div{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:5px;padding:7px 0;border-bottom:1px solid var(--line)}
+.properties .pin-nodes>div>span{overflow-wrap:anywhere}
+.properties .pin-net-alias{grid-column:1/-1;font-size:11px;padding:6px 8px;background:var(--input);color:var(--text);border-color:var(--line)}
+.electrical-junction:hover{stroke:var(--accent);stroke-width:3}
+
+/* Thai/English interface: system fonts only, no external font dependency. */
+body, button, input, dialog {font-family:Inter,"Noto Sans Thai","Leelawadee UI",Tahoma,"Segoe UI",system-ui,sans-serif}
+.language-toggle{font-size:12px;font-weight:750;letter-spacing:.01em;white-space:nowrap;color:var(--accent-text);background:var(--accent-soft);border-color:var(--accent)}
+.language-toggle:hover:not(:disabled){background:var(--hover)}
+[data-theme="dark"] .language-toggle{color:#a2f9e8}
+.cad-menu>summary{white-space:nowrap}
+.cad-menu-popover{min-width:235px;max-width:300px}
+.cad-menu-popover button{white-space:normal;line-height:1.4}
+.tools .hint{line-height:1.75}
+.design-explorer .explorer-sheet{overflow-wrap:anywhere}
+@media(max-width:1280px){header .actions{gap:5px}header .actions button{padding:7px 9px}}

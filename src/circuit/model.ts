@@ -1,22 +1,24 @@
-export type Kind = 'R' | 'C' | 'L' | 'V' | 'G';
+export type Kind = 'R' | 'C' | 'L' | 'V' | 'G' | 'O';
 export type Rotation = 0 | 90 | 180 | 270;
 export type Component = {id: string; kind: Kind; value: string; pins: string[]};
-export type Wire = {id: string; from: string; to: string};
+export type Wire = {id: string; from: string; to: string; bends?: {x: number; y: number}[]};
 export type Placement = {x: number; y: number; rotation: Rotation};
-export type Project = {version: 2; components: Component[]; wires: Wire[]; schematic: Record<string, Placement>};
+export type Point = {x: number; y: number};
+export type Project = {version: 2; components: Component[]; wires: Wire[]; schematic: Record<string, Placement>; junctions?: Record<string, Point>; netAliases?: Record<string, string>};
 
 export const GRID = 20;
 export const snap = (value: number) => Math.round(value / GRID) * GRID;
-export const defaults: Record<Kind, string> = {R: '1kΩ', C: '100nF', L: '10mH', V: '5V', G: 'GND'};
-export const names: Record<Kind, string> = {R: 'Resistor', C: 'Capacitor', L: 'Inductor', V: 'Voltage Source', G: 'Ground'};
+export const defaults: Record<Kind, string> = {R: '1kΩ', C: '100nF', L: '10mH', V: '5V', G: 'GND', O: 'Generic Op-Amp'};
+export const names: Record<Kind, string> = {R: 'Resistor', C: 'Capacitor', L: 'Inductor', V: 'Voltage Source', G: 'Ground', O: 'Op-Amp (5-pin)'};
 export const pinLabels: Record<Kind, string[]> = {
   R: ['1', '2'],
   C: ['1', '2'],
   L: ['1', '2'],
   V: ['−', '+'], // pin 0 is negative (-), pin 1 is positive (+)
   G: ['GND'],
+  O: ['IN−', 'IN+', 'OUT', 'V+', 'V−'],
 };
-const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G'];
+const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G', 'O'];
 const rotations: Rotation[] = [0, 90, 180, 270];
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -26,14 +28,15 @@ const validPoint = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000;
 
 export function createComponent(kind: Kind, id: string): Component {
-  return {id, kind, value: defaults[kind], pins: Array.from({length: kind === 'G' ? 1 : 2}, (_, i) => `${id}:${i}`)};
+  return {id, kind, value: defaults[kind], pins: Array.from({length: kind === 'G' ? 1 : kind === 'O' ? 5 : 2}, (_, i) => `${id}:${i}`)};
 }
 
 export function pinPosition(component: Component, placement: Placement, pin: string): {x: number; y: number} | null {
   const index = component.pins.indexOf(pin);
   if (index < 0) return null;
-  const dx = component.kind === 'G' ? 0 : index === 0 ? -40 : 40;
-  const dy = component.kind === 'G' ? -30 : 0;
+  const opampPins = [{x: -60, y: -20}, {x: -60, y: 20}, {x: 80, y: 0}, {x: 0, y: -60}, {x: 0, y: 60}];
+  const dx = component.kind === 'O' ? opampPins[index].x : component.kind === 'G' ? 0 : index === 0 ? -40 : 40;
+  const dy = component.kind === 'O' ? opampPins[index].y : component.kind === 'G' ? -30 : 0;
   const angle = placement.rotation * Math.PI / 180;
   return {x: placement.x + Math.round(dx * Math.cos(angle) - dy * Math.sin(angle)),
     y: placement.y + Math.round(dx * Math.sin(angle) + dy * Math.cos(angle))};
@@ -62,6 +65,7 @@ export function parseProject(text: string): Project {
   const components: Component[] = [];
   const componentIds = new Set<string>();
   const pinIds = new Set<string>();
+  const junctions: Record<string, Point> = Object.create(null);
   for (const entry of source) {
     if (!isRecord(entry) || !validId(entry.id) || !kinds.includes(entry.kind as Kind) ||
       typeof entry.value !== 'string' || entry.value.length > 120 || !entry.value.trim() ||
@@ -82,12 +86,31 @@ export function parseProject(text: string): Project {
   }
   if (layout && (Object.keys(layout).length !== components.length ||
     Object.keys(layout).some((id) => !Object.prototype.hasOwnProperty.call(schematic, id)))) throw new Error('Unexpected schematic placement.');
+  if (!legacy && raw.junctions !== undefined) {
+    if (!isRecord(raw.junctions) || Object.keys(raw.junctions).length > 10000) throw new Error('Invalid junction list.');
+    for (const [id, position] of Object.entries(raw.junctions)) {
+      if (!validId(id) || !/^J[0-9]+$/.test(id) || pinIds.has(id) || componentIds.has(id) || !isRecord(position) ||
+        !validPoint(position.x) || !validPoint(position.y))
+        throw new Error('Invalid junction position.');
+      junctions[id] = {x: position.x, y: position.y};
+    }
+  }
+  const endpoints = new Set([...pinIds, ...Object.keys(junctions)]);
+  const netAliases: Record<string, string> = Object.create(null);
+  if (!legacy && raw.netAliases !== undefined) {
+    if (!isRecord(raw.netAliases) || Object.keys(raw.netAliases).length > 10000) throw new Error('Invalid net alias list.');
+    for (const [endpoint, alias] of Object.entries(raw.netAliases)) {
+      if (!endpoints.has(endpoint) || typeof alias !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(alias))
+        throw new Error('Invalid net alias.');
+      netAliases[endpoint] = alias;
+    }
+  }
   const wires: Wire[] = [];
   const wireIds = new Set<string>();
   const edges = new Set<string>();
   for (const entry of raw.wires) {
-    if (!isRecord(entry) || !validId(entry.id) || !pinIds.has(entry.from as string) ||
-      !pinIds.has(entry.to as string) || entry.from === entry.to ||
+    if (!isRecord(entry) || !validId(entry.id) || !endpoints.has(entry.from as string) ||
+      !endpoints.has(entry.to as string) || entry.from === entry.to ||
       wireIds.has(entry.id)) throw new Error('Invalid wire or pin reference.');
     wireIds.add(entry.id);
     const from = entry.from as string;
@@ -95,7 +118,11 @@ export function parseProject(text: string): Project {
     const edge = JSON.stringify([from, to].sort());
     if (edges.has(edge)) throw new Error('Duplicate wire.');
     edges.add(edge);
-    wires.push({id: entry.id, from, to});
+    const bends = entry.bends === undefined ? [] : entry.bends;
+    if (!Array.isArray(bends) || bends.length > 100 || bends.some((p) =>
+      !isRecord(p) || !validPoint(p.x) || !validPoint(p.y))) throw new Error('Invalid wire bends.');
+    wires.push({...{id: entry.id, from, to}, ...(bends.length ? {bends: bends.map((p) => ({x: p.x as number, y: p.y as number}))} : {})});
   }
-  return {version: 2, components, wires, schematic};
+  return {version: 2, components, wires, schematic, ...(Object.keys(junctions).length ? {junctions} : {}),
+    ...(Object.keys(netAliases).length ? {netAliases} : {})};
 }

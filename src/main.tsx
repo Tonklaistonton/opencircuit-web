@@ -1,6 +1,8 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {analyzeCircuit} from './circuit/engine';
+import {opAmpExampleProject} from './circuit/examples';
+import {addFreeJunction, addWireEdge, insertWireBend, nearestWirePoint, pruneLooseJunctions, tapWire} from './circuit/routing';
 import {
   createComponent,
   GRID,
@@ -16,14 +18,32 @@ import {useHistory} from './hooks/useHistory';
 import {checkBackendHealth, requestSimulation} from './simulation/api';
 import type {SimulationResult, SimulationStatus} from './simulation/api';
 import './style.css';
+import './cad-theme.css';
+import {CadMenuBar, CadToolRail} from './CadChrome';
+import {translate} from './i18n';
+import type {Language} from './i18n';
 
 type Tool = 'select' | 'wire' | 'pan' | Kind;
 type Selection = {type: 'component' | 'wire'; id: string} | null;
 type Drag =
   | {type: 'component'; id: string; pointerId: number; start: {x: number; y: number}; original: Placement}
-  | {type: 'pan'; pointerId: number; clientX: number; clientY: number; x: number; y: number; zoom: number};
+  | {type: 'pan'; pointerId: number; clientX: number; clientY: number; x: number; y: number; zoom: number}
+  | {type: 'bend'; pointerId: number; wireId: string; index: number; original: XY};
 
-const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G'];
+const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G', 'O'];
+const FREE_WIRE_START = '__FREE_START__';
+type XY = {x: number; y: number};
+function orthogonalPath(points: XY[]): string {
+  if (!points.length) return '';
+  let path = `M${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const next = points[i];
+    if (prev.x !== next.x) path += ` H${next.x}`;
+    if (prev.y !== next.y) path += ` V${next.y}`;
+  }
+  return path;
+}
 
 function formatEngineering(val: number, unit: string): string {
   if (!Number.isFinite(val)) return 'NaN';
@@ -41,6 +61,11 @@ function formatEngineering(val: number, unit: string): string {
 }
 
 function Symbol({kind}: {kind: Kind}) {
+  if (kind === 'O') return <>
+    <path d="M-20 -48 L60 0 L-20 48 Z M-60 -20 H-20 M-60 20 H-20 M60 0 H80 M0 -60 V-36 M0 36 V60" />
+    <text x="-14" y="-15" fontSize="15" stroke="none" fill="currentColor">−</text>
+    <text x="-14" y="26" fontSize="15" stroke="none" fill="currentColor">+</text>
+  </>;
   if (kind === 'R') return <path d="M-20 0 l5 -10 10 20 10 -20 10 20 5 -10"/>;
   if (kind === 'C') return <><path d="M-6 -15 V15 M6 -15 V15"/><path d="M-20 0 H-6 M6 0 H20"/></>;
   if (kind === 'L') return <path d="M-20 0 q5 -20 10 0 q5 -20 10 0 q5 -20 10 0 q5 -20 10 0"/>;
@@ -57,20 +82,32 @@ function Symbol({kind}: {kind: Kind}) {
 }
 
 function App() {
-  const {value: project, commit, undo, redo, reset, canUndo, canRedo} = useHistory<Project>(starterProject());
+  const {value: project, commit, undo, redo, reset, canUndo, canRedo} = useHistory<Project>(opAmpExampleProject());
   const [tool, setTool] = useState<Tool>('select');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => localStorage.getItem('opencircuit-theme') === 'light' ? 'light' : 'dark');
+  const [language, setLanguage] = useState<Language>(() => localStorage.getItem('opencircuit-language') === 'en' ? 'en' : 'th');
+  const tr = (key: string) => translate(language, key);
+  const [libraryQuery, setLibraryQuery] = useState('');
+  const [showSheet, setShowSheet] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
+  const [wireBends, setWireBends] = useState<{x: number; y: number}[]>([]);
+  const [freeWireStart, setFreeWireStart] = useState<XY | null>(null);
+  const [bendPreview, setBendPreview] = useState<{wireId: string; index: number; position: XY} | null>(null);
   const [wireHoverPos, setWireHoverPos] = useState<{x: number; y: number} | null>(null);
   const [selected, setSelected] = useState<Selection>(null);
   const [preview, setPreview] = useState<{id: string; placement: Placement} | null>(null);
-  const [viewport, setViewport] = useState({x: 0, y: 0, zoom: 1});
-  const [message, setMessage] = useState('Choose a component, then click the canvas to place it.');
+  const [viewport, setViewport] = useState({x: -240, y: -180, zoom: 0.58});
+  const [message, setMessage] = useState('Op-Amp example loaded. Generic Op-Amp DC simulation is available (approximate model).');
+
+  useEffect(() => { localStorage.setItem('opencircuit-theme', theme); document.documentElement.dataset.theme = theme; }, [theme]);
+  useEffect(() => { localStorage.setItem('opencircuit-language', language); document.documentElement.lang = language; }, [language]);
+  useEffect(() => {if (!pending) setFreeWireStart(null);}, [pending]);
 
   // Simulation state
   const [simStatus, setSimStatus] = useState<SimulationStatus>('idle');
   const [simResult, setSimResult] = useState<SimulationResult | null>(null);
   const [simError, setSimError] = useState<string | null>(null);
-  const [resultsExpanded, setResultsExpanded] = useState<boolean>(true);
+  const [resultsExpanded, setResultsExpanded] = useState<boolean>(false);
   const [simSettingsOpen, setSimSettingsOpen] = useState<boolean>(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
 
@@ -109,6 +146,15 @@ function App() {
   function finishDrag(event: React.PointerEvent<SVGSVGElement>, cancelled = false) {
     const current = drag.current;
     if (!current || current.pointerId !== event.pointerId) return;
+    if (!cancelled && current.type === 'bend') {
+      const location = point(event);
+      if (location) {
+        const position = {x: snap(location.x), y: snap(location.y)};
+        if (position.x !== current.original.x || position.y !== current.original.y)
+          commit((val) => ({...val, wires: val.wires.map((w) => w.id === current.wireId
+            ? {...w, bends: (w.bends ?? []).map((b, i) => i === current.index ? position : b)} : w)}));
+      }
+    }
     if (!cancelled && current.type === 'component') {
       const location = point(event);
       const placement = location ? {...current.original,
@@ -121,6 +167,7 @@ function App() {
     drag.current = null;
     previewRef.current = null;
     setPreview(null);
+    setBendPreview(null);
   }
 
   function addComponent(kind: Kind, location: {x: number; y: number}) {
@@ -137,35 +184,95 @@ function App() {
     setMessage(`Placed ${component.id}.`);
   }
 
+  function finishWire(destination: string | XY) {
+    if (!pending) return;
+    let next = project;
+    let from = pending;
+    if (pending === FREE_WIRE_START) {
+      if (!freeWireStart) return;
+      const start = addFreeJunction(next, freeWireStart);
+      next = start.project;
+      from = start.endpoint;
+    }
+    let to: string;
+    if (typeof destination === 'string') to = destination;
+    else {
+      const end = addFreeJunction(next, destination);
+      next = end.project;
+      to = end.endpoint;
+    }
+    if (from === to) {
+      setPending(null); setFreeWireStart(null); setWireBends([]); setWireHoverPos(null);
+      setMessage('Zero-length wire cancelled.');
+      return;
+    }
+    const completed = addWireEdge(next, from, to, wireBends);
+    if (completed !== project) commit(() => completed);
+    setPending(null);
+    setFreeWireStart(null);
+    setWireBends([]);
+    setWireHoverPos(null);
+    setMessage('Wire routed and connected.');
+  }
+
   function connect(pin: string) {
     if (tool !== 'wire') return;
     if (!pending) {
       setPending(pin);
-      setMessage('Select a second pin. Press Esc to cancel.');
+      setFreeWireStart(null);
+      setWireBends([]);
+      setMessage('Route via grid clicks; connect to a pin or existing wire, or double-click to finish freely.');
+    } else {
+      finishWire(pin);
+    }
+  }
+
+  function connectToWire(wireId: string, location: XY) {
+    if (tool !== 'wire') return;
+    const originalWire = project.wires.find((w) => w.id === wireId);
+    if (!originalWire) return;
+    const at = nearestWirePoint(originalWire, pinLocations, location);
+    if (!at) return;
+    const result = tapWire(project, wireId, at, pinLocations);
+    if (!result) return;
+    const endpoint = result.endpoint;
+    if (!pending) {
+      if (result.split) commit(() => result.project);
+      setPending(endpoint);
+      setWireBends([]);
+      setMessage('Wire branch started. Click grid for corners, then click a pin or wire.');
       return;
     }
-    if (pin !== pending && !project.wires.some((w) =>
-      (w.from === pending && w.to === pin) || (w.from === pin && w.to === pending))) {
-      let index = 1;
-      while (project.wires.some((w) => w.id === `w${index}`)) index++;
-      commit((val) => ({...val, wires: [...val.wires, {id: `w${index}`, from: pending, to: pin}]}));
-      setMessage('Wire connected.');
+    let next = result.project;
+    let from = pending;
+    if (pending === FREE_WIRE_START) {
+      if (!freeWireStart) return;
+      const start = addFreeJunction(next, freeWireStart);
+      next = start.project;
+      from = start.endpoint;
     }
+    next = addWireEdge(next, from, endpoint, wireBends);
+    if (next !== project) commit(() => next);
     setPending(null);
+    setFreeWireStart(null);
+    setWireBends([]);
     setWireHoverPos(null);
+    setMessage('T-junction electrically connected.');
   }
 
   function remove() {
     if (!selected) return;
-    if (selected.type === 'wire') commit((val) => ({...val, wires: val.wires.filter((w) => w.id !== selected.id)}));
+    if (selected.type === 'wire') commit((val) => pruneLooseJunctions({...val, wires: val.wires.filter((w) => w.id !== selected.id)}));
     else commit((val) => {
       const component = val.components.find((item) => item.id === selected.id);
       if (!component) return val;
       const pins = new Set(component.pins);
       const schematic = {...val.schematic};
       delete schematic[component.id];
-      return {...val, schematic, components: val.components.filter((item) => item.id !== component.id),
-        wires: val.wires.filter((w) => !pins.has(w.from) && !pins.has(w.to))};
+      const netAliases = Object.fromEntries(Object.entries(val.netAliases ?? {}).filter(([id]) => !pins.has(id)));
+      return pruneLooseJunctions({...val, schematic, netAliases,
+        components: val.components.filter((item) => item.id !== component.id),
+        wires: val.wires.filter((w) => !pins.has(w.from) && !pins.has(w.to))});
     });
     setPending(null);
     setWireHoverPos(null);
@@ -238,9 +345,24 @@ function App() {
     }
   }
 
+  function loadOpAmpExample() {
+    if (project.wires.length > 0 && !window.confirm(tr('Load the Op-Amp example? Save your current project first.'))) return;
+    reset(opAmpExampleProject());
+    setTool('select');
+    setSelected(null);
+    setPending(null);
+    setWireBends([]);
+    setViewport({x: -240, y: -180, zoom: 0.58});
+    setSimResult(null);
+    setSimError(null);
+    setSimStatus('idle');
+    setResultsExpanded(false);
+    setMessage('Op-Amp example loaded. Generic Op-Amp DC simulation is available (approximate model).');
+  }
+
   function handleNewCircuit() {
-    if (project.components.length > 0 && !window.confirm('Create new circuit? Any unsaved changes will be lost.')) return;
-    reset({version: 2, components: [], wires: [], schematic: {}});
+    if (project.components.length > 0 && !window.confirm(tr('Create new circuit? Any unsaved changes will be lost.'))) return;
+    reset({version: 2, components: [], wires: [], schematic: {}, junctions: {}});
     setSelected(null);
     setPending(null);
     setWireHoverPos(null);
@@ -257,7 +379,7 @@ function App() {
       if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA'].includes(target.tagName))) return;
       if (event.key === 'Escape') {
         drag.current = null; previewRef.current = null; setPreview(null);
-        setPending(null); setWireHoverPos(null); setTool('select'); setMessage('Cancelled.');
+        setPending(null); setWireBends([]); setWireHoverPos(null); setTool('select'); setMessage('Cancelled.');
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
@@ -330,6 +452,9 @@ function App() {
     }
   }
 
+  for (const [id, position] of Object.entries(project.junctions ?? {})) pinLocations.set(id, position);
+  if (pending === FREE_WIRE_START && freeWireStart) pinLocations.set(FREE_WIRE_START, freeWireStart);
+
   // Junction Dots: coordinates where 2 or more wire connections meet
   const junctionCounts = new Map<string, {x: number; y: number; count: number}>();
   for (const wire of project.wires) {
@@ -359,46 +484,83 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app theme-${theme}`}>
+      <CadMenuBar groups={[
+        {label: tr("File"), commands: [
+          {label: tr("New Schematic"), run: handleNewCircuit},
+          {label: tr("Open Project…"), run: () => upload.current?.click()},
+          {label: tr("Save Project"), run: save},
+          {label: tr("Open Op-Amp Example"), run: loadOpAmpExample},
+          {label: tr("Open RC Starter Example"), run: () => {reset(starterProject()); setSelected(null); setViewport({x: -240, y: -180, zoom: 0.58}); setSimStatus('idle'); setSimResult(null);}},
+        ]},
+        {label: tr("Edit"), commands: [
+          {label: tr("Undo"), run: undo, disabled: !canUndo},
+          {label: tr("Redo"), run: redo, disabled: !canRedo},
+          {label: tr("Select / Move"), run: () => {setTool('select'); setPending(null);}},
+        ]},
+        {label: tr("Place"), commands: [
+          {label: tr('Wire'), run: () => {setTool('wire'); setPending(null); setWireBends([]);}},
+          ...kinds.map((kind) => ({label: tr(names[kind]), run: () => {setTool(kind); setPending(null);}})),
+        ]},
+        {label: tr("View"), commands: [
+          {label: tr(showSheet ? 'Hide Sheet Frame' : 'Show Sheet Frame'), run: () => setShowSheet((v) => !v)},
+          {label: tr("Zoom In"), run: () => zoomBy(1.25)},
+          {label: tr("Zoom Out"), run: () => zoomBy(1 / 1.25)},
+          {label: tr("Reset View"), run: () => setViewport({x: 0, y: 0, zoom: 1})},
+          {label: tr("Fit Schematic Sheet"), run: () => setViewport({x: -240, y: -180, zoom: 0.58})},
+          {label: tr('Toggle Dark / Light'), run: () => setTheme((v) => v === 'dark' ? 'light' : 'dark')},
+        ]},
+        {label: tr("PSpice"), commands: [
+          {label: tr("Run Simulation…"), run: () => {setSimSettingsOpen(true); settingsDialog.current?.showModal();}},
+          {label: tr("View Netlist"), run: () => netlistDialog.current?.showModal()},
+        ]},
+      ]}/>
       {/* Top Toolbar */}
       <header>
         <div className="brand">
-          ◈ <b>OpenCircuit</b> <span>Web Studio v0.4</span>
+          ◈ <b>OpenCircuit</b> <span>{tr("Studio / Schematic Editor")}</span>
         </div>
         <div className="actions">
-          <button onClick={handleNewCircuit} title="New circuit">＋ New</button>
-          <button onClick={() => upload.current?.click()} title="Open saved project">⇪ Open</button>
+          <span className="workspace-pill">{tr('● 2D SCHEMATIC')}</span>
+          <button className="language-toggle" onClick={() => setLanguage((current) => current === 'th' ? 'en' : 'th')}
+            title={language === 'th' ? 'Switch to English' : 'เปลี่ยนเป็นภาษาไทย'}
+            aria-label={language === 'th' ? 'Switch to English' : 'เปลี่ยนเป็นภาษาไทย'}
+            aria-pressed={language === 'th'}>{language === 'th' ? 'EN · English' : 'TH · ไทย'}</button>
+          <button onClick={loadOpAmpExample} title={tr("Open editable Op-Amp schematic example")}>{tr("◈ Op-Amp Example")}</button>
+          <button onClick={handleNewCircuit} title={tr("New circuit")}>{tr("＋ New")}</button>
+          <button onClick={() => upload.current?.click()} title={tr("Open saved project")}>{tr("⇪ Open")}</button>
           <input
             ref={upload}
             type="file"
             accept=".json,application/json"
             hidden
-            aria-label="Open project JSON"
+            aria-label={tr("Open project JSON")}
             onChange={(event) => void load(event.target.files?.[0])}
           />
-          <button onClick={save} title="Save circuit to JSON file">⤓ Save</button>
-          <button onClick={() => {undo(); setSelected(null); setPending(null);}} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
-          <button onClick={() => {redo(); setSelected(null); setPending(null);}} disabled={!canRedo} title="Redo (Ctrl+Y)">↷ Redo</button>
+          <button onClick={save} title={tr("Save circuit to JSON file")}>{tr("⤓ Save")}</button>
+          <button onClick={() => {undo(); setSelected(null); setPending(null);}} disabled={!canUndo} title={tr("Undo (Ctrl+Z)")}>{tr("↶ Undo")}</button>
+          <button onClick={() => {redo(); setSelected(null); setPending(null);}} disabled={!canRedo} title={tr("Redo (Ctrl+Y)")}>{tr("↷ Redo")}</button>
           <button
             className="btn-primary"
             onClick={() => {
               setSimSettingsOpen(true);
               settingsDialog.current?.showModal();
             }}
-            title="Configure and run simulation"
+            title={tr("Configure and run simulation")}
           >
-            ▶ Run Simulation
+            {tr('▶ Run Simulation')}
           </button>
-          <button onClick={() => netlistDialog.current?.showModal()} title="View SPICE netlist">
-            Preview Netlist
+          <button onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} title={tr("Switch light / dark theme")} aria-label={tr("Toggle color theme")}>{tr(theme === 'dark' ? '☀ Light' : '☾ Dark')}</button>
+          <button onClick={() => netlistDialog.current?.showModal()} title={tr("View SPICE netlist")}>
+            {tr('Preview Netlist')}
           </button>
           <span
             className={`badge ${backendOnline === true ? 'badge-completed' : backendOnline === false ? 'badge-failed' : 'badge-idle'}`}
             style={{cursor: 'pointer'}}
             onClick={() => void refreshBackendStatus()}
-            title="Click to check backend connection status"
+            title={tr("Click to check backend connection status")}
           >
-            {backendOnline === true ? '● Backend Ready' : backendOnline === false ? '○ Backend Offline' : '● Checking...'}
+            {tr(backendOnline === true ? '● Backend Ready' : backendOnline === false ? '○ Backend Offline' : '● Checking...')}
           </span>
         </div>
       </header>
@@ -415,62 +577,62 @@ function App() {
         }}
       >
         <div className="dialog-head">
-          <h2 id="sim-settings-title">Simulation Settings</h2>
-          <button onClick={() => {settingsDialog.current?.close(); setSimSettingsOpen(false);}} aria-label="Close dialog">✕</button>
+          <h2 id="sim-settings-title">{tr("Simulation Settings")}</h2>
+          <button onClick={() => {settingsDialog.current?.close(); setSimSettingsOpen(false);}} aria-label={tr("Close dialog")}>✕</button>
         </div>
         <div className="dialog-body">
           <label style={{fontSize: 12, fontWeight: 700, color: '#475569', textTransform: 'uppercase'}}>
-            Select Analysis Type
+            {tr('Select Analysis Type')}
           </label>
           <div className="sim-type-group">
             <label className="sim-type-card selected">
               <input type="radio" name="sim-type" value="op" defaultChecked readOnly />
               <div>
-                <strong>DC Operating Point (.op)</strong>
-                <small>Calculates steady-state node voltages and source currents.</small>
+                <strong>{tr("DC Operating Point (.op)")}</strong>
+                <small>{tr("Calculates steady-state node voltages and source currents.")}</small>
               </div>
             </label>
-            <label className="sim-type-card disabled" title="Coming in milestone v0.5">
+            <label className="sim-type-card disabled" title={tr("Coming in milestone v0.5")}>
               <input type="radio" name="sim-type" value="tran" disabled />
               <div>
-                <strong>Transient Analysis (.tran) <span style={{color: '#0f766e', fontWeight: 600}}>(v0.5)</span></strong>
-                <small>Time-domain voltage/current waveforms.</small>
+                <strong>{tr("Transient Analysis (.tran)")} <span style={{color: '#0f766e', fontWeight: 600}}>(v0.5)</span></strong>
+                <small>{tr("Time-domain voltage/current waveforms.")}</small>
               </div>
             </label>
-            <label className="sim-type-card disabled" title="Coming in milestone v0.5">
+            <label className="sim-type-card disabled" title={tr("Coming in milestone v0.5")}>
               <input type="radio" name="sim-type" value="ac" disabled />
               <div>
-                <strong>AC Frequency Sweep (.ac) <span style={{color: '#0f766e', fontWeight: 600}}>(v0.5)</span></strong>
-                <small>Bode plot of magnitude and phase response.</small>
+                <strong>{tr("AC Frequency Sweep (.ac)")} <span style={{color: '#0f766e', fontWeight: 600}}>(v0.5)</span></strong>
+                <small>{tr("Bode plot of magnitude and phase response.")}</small>
               </div>
             </label>
           </div>
 
           <div className="validation-box">
-            <h4>Circuit Validation Check</h4>
+            <h4>{tr("Circuit Validation Check")}</h4>
             {analysis.issues.length ? (
               <ul>
                 {analysis.issues.map((issue, idx) => (
                   <li key={idx} className={issue.severity}>
-                    <strong>{issue.severity.toUpperCase()}:</strong> {issue.message}
+                    <strong>{tr(issue.severity.toUpperCase())}:</strong> {tr(issue.message)}
                   </li>
                 ))}
               </ul>
             ) : (
               <p style={{margin: 0, color: '#166534', fontSize: 13, fontWeight: 600}}>
-                ✓ Circuit topology is valid for SPICE simulation.
+                {tr('✓ Circuit topology is valid for SPICE simulation.')}
               </p>
             )}
           </div>
         </div>
         <div className="dialog-foot">
-          <button onClick={() => {settingsDialog.current?.close(); setSimSettingsOpen(false);}}>Cancel</button>
+          <button onClick={() => {settingsDialog.current?.close(); setSimSettingsOpen(false);}}>{tr("Cancel")}</button>
           <button
             className="btn-primary"
             onClick={() => void executeSimulation()}
             disabled={!analysis.netlist || simStatus === 'running'}
           >
-            {analysis.netlist ? 'Run DC Simulation' : 'Fix Errors Before Simulating'}
+            {tr(analysis.netlist ? 'Run DC Simulation' : 'Fix Errors Before Simulating')}
           </button>
         </div>
       </dialog>
@@ -485,25 +647,25 @@ function App() {
         }}
       >
         <div className="dialog-head">
-          <h2 id="netlist-title">SPICE Netlist Preview</h2>
-          <button onClick={() => netlistDialog.current?.close()} aria-label="Close netlist preview">✕</button>
+          <h2 id="netlist-title">{tr("SPICE Netlist Preview")}</h2>
+          <button onClick={() => netlistDialog.current?.close()} aria-label={tr("Close netlist preview")}>✕</button>
         </div>
         <p style={{margin: '0 0 12px', fontSize: 13, color: '#64748b'}}>
-          Topological SPICE netlist generated from pin IDs and wires.
+          {tr('Topological SPICE netlist generated from pin IDs and wires.')}
         </p>
-        <h4 style={{margin: '12px 0 6px', fontSize: 12, textTransform: 'uppercase', color: '#64748b'}}>Validation</h4>
+        <h4 style={{margin: '12px 0 6px', fontSize: 12, textTransform: 'uppercase', color: '#64748b'}}>{tr("Validation")}</h4>
         {analysis.issues.length ? (
           <ul style={{margin: 0, paddingLeft: 20, fontSize: 13}}>
             {analysis.issues.map((issue, index) => (
               <li key={index} style={{color: issue.severity === 'error' ? '#b91c1c' : '#b45309'}}>
-                <strong>{issue.severity}:</strong> {issue.message}
+                <strong>{tr(issue.severity)}:</strong> {tr(issue.message)}
               </li>
             ))}
           </ul>
         ) : (
-          <p style={{margin: 0, fontSize: 13, color: '#166534'}}>✓ No validation issues found.</p>
+          <p style={{margin: 0, fontSize: 13, color: '#166534'}}>{tr("✓ No validation issues found.")}</p>
         )}
-        <h4 style={{margin: '12px 0 6px', fontSize: 12, textTransform: 'uppercase', color: '#64748b'}}>Electrical Nets</h4>
+        <h4 style={{margin: '12px 0 6px', fontSize: 12, textTransform: 'uppercase', color: '#64748b'}}>{tr("Electrical Nets")}</h4>
         <ul style={{margin: 0, paddingLeft: 20, fontSize: 13}}>
           {analysis.nets.map((net) => (
             <li key={net.name}>
@@ -513,46 +675,65 @@ function App() {
         </ul>
         {analysis.netlist ? (
           <>
-            <h4 style={{margin: '12px 0 6px', fontSize: 12, textTransform: 'uppercase', color: '#64748b'}}>Deterministic Netlist</h4>
+            <h4 style={{margin: '12px 0 6px', fontSize: 12, textTransform: 'uppercase', color: '#64748b'}}>{tr("Deterministic Netlist")}</h4>
             <pre>{analysis.netlist}</pre>
             <button onClick={() => {if (analysis.netlist) download('circuit.cir', analysis.netlist, 'text/plain');}}>
-              Export Netlist (.cir)
+              {tr('Export Netlist (.cir)')}
             </button>
           </>
         ) : (
-          <p style={{color: '#b91c1c', fontSize: 13}}>Fix the errors above to generate SPICE netlist.</p>
+          <p style={{color: '#b91c1c', fontSize: 13}}>{tr("Fix the errors above to generate SPICE netlist.")}</p>
         )}
       </dialog>
 
       {/* Main 3-column Layout */}
       <main>
+        <CadToolRail items={[
+          {label: tr("Select / Move"), icon: '↖', active: tool === 'select', run: () => {setTool('select'); setPending(null);}},
+          {label: tr("Place Wire"), icon: '⌁', active: tool === 'wire', run: () => {setTool('wire'); setPending(null); setWireBends([]);}},
+          {label: tr("Pan"), icon: '✥', active: tool === 'pan', run: () => {setTool('pan'); setPending(null);}},
+          {label: tr("Place Resistor"), icon: 'R', active: tool === 'R', run: () => setTool('R')},
+          {label: tr("Place Capacitor"), icon: 'C', active: tool === 'C', run: () => setTool('C')},
+          {label: tr("Place Inductor"), icon: 'L', active: tool === 'L', run: () => setTool('L')},
+          {label: tr("Place Voltage Source"), icon: 'V', active: tool === 'V', run: () => setTool('V')},
+          {label: tr("Place Ground"), icon: '⏚', active: tool === 'G', run: () => setTool('G')},
+        ]}/>
         {/* Left Column: Component Library & Tools */}
         <aside className="tools">
-          <h3>Tools</h3>
+          <h3>{tr("Design Explorer")}</h3>
+          <div className="design-explorer">
+            <div className="explorer-root">{tr("▣ OpenCircuit Project")}</div>
+            <button className="explorer-sheet" onClick={() => {setTool('select'); setViewport({x: 0, y: 0, zoom: 1}); setSelected(null);}}>
+              {tr('└ ▤ SCHEMATIC1 / PAGE1')}
+            </button>
+            <small>{tr("1 active schematic sheet")}</small>
+          </div>
+          <h3>{tr("Drawing Tools")}</h3>
           <button
             className={tool === 'select' ? 'active' : ''}
             aria-pressed={tool === 'select'}
             onClick={() => {setTool('select'); setPending(null);}}
           >
-            ↖ Select / Move
+            {tr('↖ Select / Move')}
           </button>
           <button
             className={tool === 'wire' ? 'active' : ''}
             aria-pressed={tool === 'wire'}
             onClick={() => {setTool('wire'); setPending(null);}}
           >
-            ⌁ Wire
+            {tr('⌁ Wire')}
           </button>
           <button
             className={tool === 'pan' ? 'active' : ''}
             aria-pressed={tool === 'pan'}
             onClick={() => {setTool('pan'); setPending(null);}}
           >
-            ✥ Pan
+            {tr('✥ Pan')}
           </button>
 
-          <h3>Components</h3>
-          {kinds.map((kind) => (
+          <h3>{tr("Component Library")}</h3>
+          <input className="library-search" value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder={tr("⌕ Search components...")} aria-label={tr("Search components")} />
+          {kinds.filter((kind) => `${kind} ${tr(names[kind])} ${translate('th', names[kind])}`.toLowerCase().includes(libraryQuery.trim().toLowerCase())).map((kind) => (
             <button
               key={kind}
               className={tool === kind ? 'active' : ''}
@@ -562,27 +743,30 @@ function App() {
               onDragStart={(event) => event.dataTransfer.setData('application/x-opencircuit-kind', kind)}
             >
               <span className="component-symbol">{kind}</span>
-              {names[kind]}
+              {tr(names[kind])}
             </button>
           ))}
           <div className="hint">
-            • <b>Place:</b> Drag or click component, then canvas.<br/>
-            • <b>Wire:</b> Click two pin circles.<br/>
-            • <b>Pan:</b> Drag canvas with middle-click or Pan tool.<br/>
-            • <b>Rotate:</b> Press 'R' or click Rotate 90°.<br/>
-            • <b>Cancel:</b> Right-click or press Esc.
+            • <b>{tr("Place:")}</b> {tr("Drag or click component, then canvas.")}<br/>
+            • <b>{tr("Wire:")}</b> {tr("Start from any grid point, pin or wire. Click to bend, click target to connect or double-click grid to finish.")}<br/>
+            • <b>{tr("Pan:")}</b> {tr("Drag canvas with middle-click or Pan tool.")}<br/>
+            • <b>{tr("Edit wire:")}</b> {tr("Double-click a segment to add an orange bend handle, then drag it.")}<br/>
+            • <b>{tr('Rotate:')}</b> {tr("Press 'R' or click Rotate 90°.")}<br/>
+            • <b>{tr('Cancel:')}</b> {tr('Right-click or press Esc.')}
           </div>
         </aside>
 
         {/* Center Column: Schematic Canvas & Simulation Results Panel */}
         <section className="workspace">
           <div className="workspace-head">
-            <strong>Schematic Canvas</strong>
+            <strong><span className="document-dot">●</span> {tr("Circuit 1")} <span className="workspace-subtitle">{tr("/ Schematic")}</span></strong>
             <div className="workspace-controls">
-              <button onClick={() => zoomBy(1 / 1.25)} aria-label="Zoom out" title="Zoom out">−</button>
-              <span aria-label="Zoom level">{Math.round(viewport.zoom * 100)}%</span>
-              <button onClick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in">+</button>
-              <button onClick={() => setViewport({x: 0, y: 0, zoom: 1})} title="Reset View">1:1</button>
+              <button onClick={() => setShowSheet((v) => !v)} title={tr("Toggle engineering drawing sheet")} aria-pressed={showSheet}>{tr(showSheet ? '▤ Sheet A3' : '▧ Infinite Grid')}</button>
+              <button onClick={() => setViewport({x: -240, y: -180, zoom: 0.58})} title={tr("Fit schematic sheet")}>{tr("Fit Sheet")}</button>
+              <button onClick={() => zoomBy(1 / 1.25)} aria-label={tr("Zoom out")} title={tr("Zoom out")}>−</button>
+              <span aria-label={tr("Zoom level")}>{Math.round(viewport.zoom * 100)}%</span>
+              <button onClick={() => zoomBy(1.25)} aria-label={tr("Zoom in")} title={tr("Zoom in")}>+</button>
+              <button onClick={() => setViewport({x: 0, y: 0, zoom: 1})} title={tr("Reset View")}>1:1</button>
             </div>
           </div>
 
@@ -590,8 +774,15 @@ function App() {
             <svg
               ref={svg}
               role="img"
-              aria-label="Schematic canvas"
+              aria-label={tr("Schematic canvas")}
               viewBox={`${viewport.x} ${viewport.y} ${viewWidth} ${viewHeight}`}
+              onDoubleClick={(event) => {
+                if (tool !== 'wire' || !pending) return;
+                if (event.target !== svg.current &&
+                    !(event.target instanceof Element && event.target.classList.contains('grid-hit'))) return;
+                const location = point(event);
+                if (location) finishWire({x: snap(location.x), y: snap(location.y)});
+              }}
               onDragOver={(event) => {
                 if (event.dataTransfer.types.includes('application/x-opencircuit-kind')) event.preventDefault();
               }}
@@ -611,6 +802,7 @@ function App() {
                 event.preventDefault();
                 if (pending) {
                   setPending(null);
+                  setWireBends([]);
                   setWireHoverPos(null);
                   setMessage('Wiring cancelled.');
                 } else if (selected) {
@@ -642,6 +834,19 @@ function App() {
                   const location = point(event);
                   if (!location) return;
                   addComponent(tool as Kind, location);
+                } else if (tool === 'wire') {
+                  const location = point(event);
+                  if (location) {
+                    const bend = {x: snap(location.x), y: snap(location.y)};
+                    if (!pending) {
+                      setPending(FREE_WIRE_START);
+                      setFreeWireStart(bend);
+                      setWireBends([]);
+                      setMessage('Free wire started. Click to route; double-click to finish, or connect to a pin or wire.');
+                    } else if (wireBends.length < 100 && !wireBends.some((p) => p.x === bend.x && p.y === bend.y)) {
+                      setWireBends((points) => [...points, bend]);
+                    }
+                  }
                 } else if (tool === 'select') setSelected(null);
               }}
               onPointerMove={(event) => {
@@ -659,6 +864,10 @@ function App() {
                       x: current.x - (event.clientX - current.clientX) / scale,
                       y: current.y - (event.clientY - current.clientY) / scale,
                     }));
+                } else if (current.type === 'bend') {
+                  const location = point(event);
+                  if (location) setBendPreview({wireId: current.wireId, index: current.index,
+                    position: {x: snap(location.x), y: snap(location.y)}});
                 } else {
                   const location = point(event);
                   if (!location) return;
@@ -676,10 +885,45 @@ function App() {
             >
               <defs>
                 <pattern id="dots" width={GRID} height={GRID} patternUnits="userSpaceOnUse">
-                  <circle cx="1" cy="1" r="1" fill="#cbd5e1" />
+                  <circle cx="1" cy="1" r="1" fill={theme === 'dark' ? '#30435b' : '#cbd5e1'} />
                 </pattern>
               </defs>
+              {showSheet && <rect x="-180" y="-130" width="1260" height="840" pointerEvents="none"
+                fill={theme === 'dark' ? '#172538' : '#ffffff'} stroke={theme === 'dark' ? '#324861' : '#c9d5e2'} strokeWidth="2" />}
               <rect className="grid-hit" x={viewport.x} y={viewport.y} width={viewWidth} height={viewHeight} fill="url(#dots)" />
+              {showSheet && (
+                <g pointerEvents="none" className="schematic-sheet">
+                  <rect x="-180" y="-130" width="1260" height="840" fill="none" stroke={theme === 'dark' ? '#71869e' : '#64748b'} strokeWidth="2" />
+                  <rect x="-162" y="-112" width="1224" height="804" fill="none" stroke={theme === 'dark' ? '#435872' : '#94a3b8'} strokeWidth="1" />
+                  {Array.from({length: 6}, (_, i) => (
+                    <g key={`sheet-col-${i}`} fill={theme === 'dark' ? '#9db0c6' : '#475569'} fontSize="12" textAnchor="middle">
+                      <path d={`M${-162 + i * 204} -130 V-112 M${-162 + i * 204} 692 V710`} stroke="currentColor" opacity=".5" />
+                      <text x={-60 + i * 204} y="-117">{i + 1}</text>
+                      <text x={-60 + i * 204} y="706">{i + 1}</text>
+                    </g>
+                  ))}
+                  {Array.from({length: 4}, (_, i) => (
+                    <g key={`sheet-row-${i}`} fill={theme === 'dark' ? '#9db0c6' : '#475569'} fontSize="12" textAnchor="middle">
+                      <path d={`M-180 ${-112 + i * 201} H-162 M1062 ${-112 + i * 201} H1080`} stroke="currentColor" opacity=".5" />
+                      <text x="-171" y={-8 + i * 201}>{String.fromCharCode(65 + i)}</text>
+                      <text x="1071" y={-8 + i * 201}>{String.fromCharCode(65 + i)}</text>
+                    </g>
+                  ))}
+                  <g transform="translate(652 562)" stroke={theme === 'dark' ? '#8ca3bc' : '#64748b'} fill="none" strokeWidth="1.3">
+                    <rect width="410" height="130" />
+                    <path d="M0 45 H410 M0 85 H410 M255 45 V130 M335 85 V130" />
+                    <g stroke="none" fill={theme === 'dark' ? '#d7e6f5' : '#334155'} fontSize="12">
+                      <text x="12" y="18">{tr("OPENCIRCUIT STUDIO · ENGINEERING DRAWING")}</text>
+                      <text x="12" y="36" fontSize="16" fontWeight="bold">{tr("Circuit 1 — Schematic")}</text>
+                      <text x="12" y="62">{tr("DOCUMENT")}</text><text x="12" y="78">OC-SCH-001</text>
+                      <text x="268" y="62">{tr("SIZE")}</text><text x="268" y="78">A3</text>
+                      <text x="12" y="103">{tr("2D SCHEMATIC / SPICE")}</text>
+                      <text x="268" y="103">{tr("REV")}</text><text x="268" y="120">A</text>
+                      <text x="345" y="103">{tr("SHEET")}</text><text x="345" y="120">1 / 1</text>
+                    </g>
+                  </g>
+                </g>
+              )}
 
               {/* Orthogonal 2D Wires */}
               {project.wires.map((wire) => {
@@ -687,18 +931,33 @@ function App() {
                 const b = pinLocations.get(wire.to);
                 if (!a || !b) return null;
                 const isSelected = selectedWire?.id === wire.id;
-                const wirePath = a.x === b.x
-                  ? `M${a.x} ${a.y} V${b.y}`
-                  : a.y === b.y
-                  ? `M${a.x} ${a.y} H${b.x}`
-                  : `M${a.x} ${a.y} H${b.x} V${b.y}`;
+                const bends = (wire.bends ?? []).map((p, i) => bendPreview?.wireId === wire.id && bendPreview.index === i ? bendPreview.position : p);
+                const wirePath = orthogonalPath([a, ...bends, b]);
                 return (
                   <g
                     key={wire.id}
-                    onPointerDown={(event) => {
-                      if (tool !== 'select' || event.button !== 0) return;
+                    onDoubleClick={(event) => {
+                      if (tool !== 'select') return;
                       event.stopPropagation();
+                      const location = point(event);
+                      const at = location ? nearestWirePoint(wire, pinLocations, location) : null;
+                      if (!at) return;
+                      const adjusted = insertWireBend(wire, at, pinLocations);
+                      if (!adjusted) return;
+                      commit((val) => ({...val, wires: val.wires.map((entry) => entry.id === wire.id ? adjusted : entry)}));
                       setSelected({type: 'wire', id: wire.id});
+                      setMessage('Wire bend inserted. Drag its orange handle to reroute.');
+                    }}
+                    onPointerDown={(event) => {
+                      if (event.button !== 0) return;
+                      if (tool === 'wire') {
+                        event.stopPropagation();
+                        const location = point(event);
+                        if (location) connectToWire(wire.id, location);
+                      } else if (tool === 'select') {
+                        event.stopPropagation();
+                        setSelected({type: 'wire', id: wire.id});
+                      }
                     }}
                   >
                     <path d={wirePath} stroke="transparent" strokeWidth="14" fill="none" />
@@ -711,6 +970,23 @@ function App() {
                       fill="none"
                       pointerEvents="none"
                     />
+                    {project.netAliases?.[wire.from] && (
+                      <text x={a.x + 8} y={a.y - 15} pointerEvents="none"
+                        fontSize="13" fontWeight="700" fill={theme === 'dark' ? '#9eead6' : '#00686e'}>
+                        {project.netAliases[wire.from]}
+                      </text>
+                    )}
+                    {isSelected && bends.map((bend, index) => (
+                      <circle key={index} cx={bend.x} cy={bend.y} r="7" fill="#ffffff"
+                        stroke="#f59e0b" strokeWidth="2" style={{cursor: 'move'}}
+                        onPointerDown={(event) => {
+                          if (event.button !== 0) return;
+                          event.stopPropagation();
+                          drag.current = {type: 'bend', pointerId: event.pointerId, wireId: wire.id,
+                            index, original: bend};
+                          svg.current?.setPointerCapture(event.pointerId);
+                        }}/>
+                    ))}
                   </g>
                 );
               })}
@@ -722,15 +998,26 @@ function App() {
                 </g>
               ))}
 
+              {pending === FREE_WIRE_START && freeWireStart && (
+                <circle cx={freeWireStart.x} cy={freeWireStart.y} r="6" fill="none" stroke="#f59e0b"
+                  strokeWidth="2" pointerEvents="none" />
+              )}
+              {Object.entries(project.junctions ?? {}).map(([id, position]) => (
+                <circle key={id} cx={position.x} cy={position.y} r="6" className="electrical-junction"
+                  stroke={theme === 'dark' ? '#101a28' : '#ffffff'} strokeWidth="1.3" fill="#0d9488"
+                  style={{cursor: tool === 'wire' ? 'crosshair' : 'default'}}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0 || tool !== 'wire') return;
+                    event.stopPropagation();
+                    connect(id);
+                  }}/>
+              ))}
+
               {/* Rubber-band Orthogonal Wire Preview */}
               {tool === 'wire' && pending && wireHoverPos && (() => {
                 const start = pinLocations.get(pending);
                 if (!start) return null;
-                const previewPath = start.x === wireHoverPos.x
-                  ? `M${start.x} ${start.y} V${wireHoverPos.y}`
-                  : start.y === wireHoverPos.y
-                  ? `M${start.x} ${start.y} H${wireHoverPos.x}`
-                  : `M${start.x} ${start.y} H${wireHoverPos.x} V${wireHoverPos.y}`;
+                const previewPath = orthogonalPath([start, ...wireBends, wireHoverPos]);
                 return (
                   <g pointerEvents="none">
                     <path
@@ -774,29 +1061,29 @@ function App() {
                       style={{cursor: tool === 'select' ? 'grab' : 'default'}}
                     >
                       <rect
-                        x="-33"
-                        y="-31"
-                        width="66"
-                        height="62"
+                        x={component.kind === 'O' ? -67 : -33}
+                        y={component.kind === 'O' ? -65 : -31}
+                        width={component.kind === 'O' ? 153 : 66}
+                        height={component.kind === 'O' ? 130 : 62}
                         rx="6"
-                        fill={isSelected ? '#e0f2fe' : '#fff'}
+                        fill={isSelected ? (theme === 'dark' ? '#213d52' : '#e0f2fe') : (theme === 'dark' ? '#182537' : '#fff')}
                         stroke={isSelected ? '#0284c7' : 'transparent'}
                         strokeWidth="2"
                       />
                       <g
                         transform={`rotate(${placement.rotation})`}
-                        stroke="#1e293b"
+                        stroke={theme === 'dark' ? '#e0eaf7' : '#1e293b'}
                         strokeWidth="2.5"
                         fill="none"
                         strokeLinecap="round"
                       >
                         <Symbol kind={component.kind} />
-                        {component.kind !== 'G' && <path d="M-40 0 H-20 M20 0 H40" />}
+                        {component.kind !== 'G' && component.kind !== 'O' && <path d="M-40 0 H-20 M20 0 H40" />}
                       </g>
-                      <text x="0" y="-37" textAnchor="middle" fontSize="15" fill="#334155" fontWeight="600">
+                      <text x="0" y={component.kind === 'O' ? -74 : -37} textAnchor="middle" fontSize="15" fill={theme === 'dark' ? '#e0eaf7' : '#334155'} fontWeight="600">
                         {component.id}
                       </text>
-                      <text x="0" y="45" textAnchor="middle" fontSize="12" fill="#64748b">
+                      <text x="0" y={component.kind === 'O' ? 78 : 45} textAnchor="middle" fontSize="12" fill={theme === 'dark' ? '#a7b8cb' : '#64748b'}>
                         {valueDraft?.id === component.id ? valueDraft.value : component.value}
                       </text>
                     </g>
@@ -823,7 +1110,12 @@ function App() {
                               }}
                               style={{cursor: tool === 'wire' ? 'crosshair' : 'default'}}
                             />
-                            {component.kind === 'V' && (
+                            {project.netAliases?.[pin] && (
+                              <text x={position.x + 10} y={position.y - 13} fontSize="13"
+                                fontWeight="700" fill={theme === 'dark' ? '#7fe3d4' : '#006b71'}
+                                pointerEvents="none">{project.netAliases[pin]}</text>
+                            )}
+                            {(component.kind === 'V' || component.kind === 'O') && (
                               <text
                                 x={position.x}
                                 y={position.y - 10}
@@ -846,30 +1138,30 @@ function App() {
             </svg>
           </div>
 
-          <div className="status" role="status">{message}</div>
+          <div className="status" role="status">{tr(message)}</div>
 
           {/* Simulation Results Panel */}
           <div className={`results-panel ${resultsExpanded ? 'expanded' : 'collapsed'}`}>
             <div className="results-header">
               <div className="results-header-left">
-                <span>Simulation Results</span>
+                <span>{tr("Simulation Results")}</span>
                 <span className={`badge badge-${simStatus}`}>
-                  {simStatus === 'idle' && '● Idle'}
-                  {simStatus === 'running' && '⟳ Running...'}
-                  {simStatus === 'completed' && '✓ Completed'}
-                  {simStatus === 'failed' && '✕ Failed'}
+                  {simStatus === 'idle' && tr('● Idle')}
+                  {simStatus === 'running' && tr('⟳ Running...')}
+                  {simStatus === 'completed' && tr('✓ Completed')}
+                  {simStatus === 'failed' && tr('✕ Failed')}
                 </span>
                 <div className="results-tabs">
-                  <button className="tab-btn active">DC Operating Point</button>
-                  <button className="tab-btn" disabled title="Waveforms for transient and AC simulations will arrive in v0.5">
-                    Waveforms (v0.5)
+                  <button className="tab-btn active">{tr("DC Operating Point")}</button>
+                  <button className="tab-btn" disabled title={tr("Waveforms for transient and AC simulations will arrive in v0.5")}>
+                    {tr('Waveforms (v0.5)')}
                   </button>
                 </div>
               </div>
               <div style={{display: 'flex', gap: 6, alignItems: 'center'}}>
                 {simStatus === 'completed' && (
                   <button className="btn-sm" onClick={() => void executeSimulation()} title="Re-run simulation">
-                    Re-run
+                    {tr('Re-run')}
                   </button>
                 )}
                 <button
@@ -877,7 +1169,7 @@ function App() {
                   onClick={() => setResultsExpanded(!resultsExpanded)}
                   title={resultsExpanded ? 'Collapse panel' : 'Expand panel'}
                 >
-                  {resultsExpanded ? '▼ Collapse' : '▲ Expand'}
+                  {tr(resultsExpanded ? '▼ Collapse' : '▲ Expand')}
                 </button>
               </div>
             </div>
@@ -887,17 +1179,17 @@ function App() {
                 {simStatus === 'running' && (
                   <div className="empty-results">
                     <p style={{fontSize: 14, fontWeight: 600, color: '#0f766e'}}>
-                      ⟳ Simulating circuit in ngspice...
+                      {tr('⟳ Simulating circuit in ngspice...')}
                     </p>
-                    <small>Executing DC operating point analysis safely via Python backend.</small>
+                    <small>{tr("Executing DC operating point analysis safely via Python backend.")}</small>
                   </div>
                 )}
 
                 {simStatus === 'failed' && (
                   <div className="alert-error">
                     <div>
-                      <strong>Simulation Failed:</strong>
-                      <p style={{margin: '4px 0'}}>{simError}</p>
+                      <strong>{tr("Simulation Failed:")}</strong>
+                      <p style={{margin: '4px 0'}}>{simError ? tr(simError) : null}</p>
                       {simResult?.raw_output && <pre>{simResult.raw_output}</pre>}
                     </div>
                   </div>
@@ -907,14 +1199,14 @@ function App() {
                   <div className="results-grid">
                     {/* Node Voltages Table */}
                     <div className="results-card">
-                      <h4>Node Voltages (DC Operating Point)</h4>
+                      <h4>{tr("Node Voltages (DC Operating Point)")}</h4>
                       <table className="sim-table">
                         <thead>
                           <tr>
-                            <th>Node</th>
-                            <th>Voltage (V)</th>
-                            <th>Formatted</th>
-                            <th>Pins</th>
+                            <th>{tr("Node")}</th>
+                            <th>{tr("Voltage (V)")}</th>
+                            <th>{tr("Formatted")}</th>
+                            <th>{tr("Pins")}</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -922,7 +1214,7 @@ function App() {
                             .sort(([a], [b]) => a === '0' ? -1 : b === '0' ? 1 : a.localeCompare(b, undefined, {numeric: true}))
                             .map(([node, volt]) => (
                               <tr key={node}>
-                                <td><strong>{node === '0' ? '0 (GND)' : node}</strong></td>
+                                <td><strong>{node === '0' ? tr('Node 0 (GND)') : node}</strong></td>
                                 <td className="num-cell">{volt.toFixed(4)}</td>
                                 <td className="num-cell" style={{color: '#0f766e'}}>{formatEngineering(volt, 'V')}</td>
                                 <td style={{color: '#64748b', fontSize: 11}}>{nodePinsMap.get(node)?.join(', ') ?? '—'}</td>
@@ -934,14 +1226,14 @@ function App() {
 
                     {/* Branch Currents Table */}
                     <div className="results-card">
-                      <h4>Source Branch Currents</h4>
+                      <h4>{tr("Source Branch Currents")}</h4>
                       {Object.keys(simResult.branch_currents).length > 0 ? (
                         <table className="sim-table">
                           <thead>
                             <tr>
-                              <th>Source</th>
-                              <th>Current (A)</th>
-                              <th>Formatted</th>
+                              <th>{tr("Source")}</th>
+                              <th>{tr("Current (A)")}</th>
+                              <th>{tr("Formatted")}</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -955,7 +1247,7 @@ function App() {
                           </tbody>
                         </table>
                       ) : (
-                        <p style={{color: '#64748b', fontSize: 12}}>No branch currents reported.</p>
+                        <p style={{color: '#64748b', fontSize: 12}}>{tr("No branch currents reported.")}</p>
                       )}
                     </div>
                   </div>
@@ -963,7 +1255,7 @@ function App() {
 
                 {simStatus === 'idle' && (
                   <div className="empty-results">
-                    Click <strong>▶ Run Simulation</strong> in the top toolbar to calculate DC operating voltages and currents using ngspice.
+                    {tr('Click')} <strong>{tr('▶ Run Simulation')}</strong> {tr('in the top toolbar to calculate DC operating voltages and currents using ngspice.')}
                   </div>
                 )}
               </div>
@@ -973,14 +1265,14 @@ function App() {
 
         {/* Right Column: Properties Panel */}
         <aside className="properties">
-          <h3>Properties</h3>
+          <h3>{tr("Properties")}</h3>
           {selectedComponent ? (
             <>
-              <label>Component</label>
+              <label>{tr("Component")}</label>
               <p>
-                <strong>{selectedComponent.id}</strong> · {names[selectedComponent.kind]}
+                <strong>{selectedComponent.id}</strong> · {tr(names[selectedComponent.kind])}
               </p>
-              <label htmlFor="component-value">Value</label>
+              <label htmlFor="component-value">{tr("Value")}</label>
               <input
                 id="component-value"
                 value={valueDraft?.id === selectedComponent.id ? valueDraft.value : selectedComponent.value}
@@ -999,48 +1291,92 @@ function App() {
                 }}
               />
               <p style={{color: '#64748b', fontSize: 12}}>
-                Rotation: {project.schematic[selectedComponent.id]?.rotation ?? 0}°
+                {tr('Rotation:')} {project.schematic[selectedComponent.id]?.rotation ?? 0}°
               </p>
 
               <div className="pin-nodes">
-                <strong style={{display: 'block', marginBottom: 4, color: '#475569'}}>Electrical Connections</strong>
+                <strong style={{display: 'block', marginBottom: 4, color: '#475569'}}>{tr("Electrical Connections")}</strong>
                 {selectedComponent.pins.map((pin, idx) => {
                   const node = analysis.nets.find((net) => net.pins.includes(pin))?.name ?? 'unconnected';
                   const label = pinLabels[selectedComponent.kind]?.[idx] ?? '';
                   return (
                     <div key={pin}>
-                      <span>{label ? `Pin ${label} (${pin})` : pin}:</span>
-                      <strong style={{color: node === '0' ? '#166534' : node === 'unconnected' ? '#b91c1c' : '#0284c7'}}>
-                        {node === '0' ? 'Node 0 (GND)' : node === 'unconnected' ? 'Not connected' : `Node ${node}`}
+                      <span>{label ? `${tr('Pin')} ${label} (${pin})` : pin}:</span>
+                      <strong style={{color: node === '0' ? '#16a34a' : node === 'unconnected' ? '#dc2626' : '#0284c7'}}>
+                        {node === '0' ? tr('Node 0 (GND)') : node === 'unconnected' ? tr('Not connected') : `${tr('Node')} ${node}`}
                       </strong>
+                      <input className="pin-net-alias" aria-label={`${tr('Net alias for')} ${pin}`}
+                        key={pin} placeholder={tr("Net alias...")} maxLength={32}
+                        defaultValue={project.netAliases?.[pin] ?? ''}
+                        onBlur={(event) => {
+                          const next = event.currentTarget.value.trim();
+                          if (next && !/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(next)) {
+                            setMessage('Invalid net alias: use letters, numbers or underscore.');
+                            event.currentTarget.value = project.netAliases?.[pin] ?? '';
+                            return;
+                          }
+                          if (next.toUpperCase() === (project.netAliases?.[pin] ?? '').toUpperCase()) return;
+                          commit((value) => {
+                            const aliases = {...value.netAliases};
+                            if (next) aliases[pin] = next.toUpperCase();
+                            else delete aliases[pin];
+                            return {...value, netAliases: aliases};
+                          });
+                          setMessage(next ? `Net label ${next.toUpperCase()} assigned to ${pin}.` : `Net alias cleared from ${pin}.`);
+                        }}
+                        onKeyDown={(event) => {if (event.key === 'Enter') event.currentTarget.blur();}}
+                      />
                     </div>
                   );
                 })}
               </div>
 
               <div style={{display: 'flex', gap: 6, marginTop: 8}}>
-                <button onClick={rotate} style={{flex: 1}}>Rotate 90°</button>
-                <button className="danger" onClick={remove} style={{flex: 1}}>Delete</button>
+                <button onClick={rotate} style={{flex: 1}}>{tr("Rotate 90°")}</button>
+                <button className="danger" onClick={remove} style={{flex: 1}}>{tr("Delete")}</button>
               </div>
             </>
           ) : selectedWire ? (
             <>
-              <label>Selected Wire</label>
+              <label>{tr("Selected Wire")}</label>
               <p>ID: {selectedWire.id}</p>
               <p style={{fontSize: 12, color: '#64748b'}}>
-                From: <code>{selectedWire.from}</code><br/>
-                To: <code>{selectedWire.to}</code>
+                {tr('From:')} <code>{selectedWire.from}</code><br/>
+                {tr('To:')} <code>{selectedWire.to}</code>
               </p>
-              <button className="danger" onClick={remove}>Delete wire</button>
+              <label htmlFor="wire-net-alias">{tr("Net Alias (join same-name nets)")}</label>
+              <input id="wire-net-alias" key={selectedWire.id}
+                placeholder={tr("e.g. VCC, VOUT, INPUT")} maxLength={32}
+                defaultValue={project.netAliases?.[selectedWire.from] ?? ''}
+                onBlur={(event) => {
+                  const label = event.currentTarget.value.trim();
+                  if (label && !/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(label)) {
+                    setMessage('Invalid alias: use letters, digits and underscores, starting with a letter.');
+                    event.currentTarget.value = project.netAliases?.[selectedWire.from] ?? '';
+                    return;
+                  }
+                  const old = project.netAliases?.[selectedWire.from] ?? '';
+                  if (old === label) return;
+                  commit((val) => {
+                    const next = {...val.netAliases};
+                    if (label) next[selectedWire.from] = label.toUpperCase();
+                    else delete next[selectedWire.from];
+                    return {...val, netAliases: next};
+                  });
+                  setMessage(label ? `Net alias assigned: ${label.toUpperCase()}.` : 'Net alias removed.');
+                }}
+                onKeyDown={(event) => {if (event.key === 'Enter') event.currentTarget.blur();}}
+              />
+              <button className="danger" onClick={remove}>{tr("Delete wire")}</button>
             </>
           ) : (
-            <p className="muted">Select a component or wire to inspect and edit its properties.</p>
+            <p className="muted">{tr("Select a component or wire to inspect and edit its properties.")}</p>
           )}
 
-          <h3>Circuit Summary</h3>
-          <p style={{margin: '2px 0'}}>{project.components.length} components</p>
-          <p style={{margin: '2px 0'}}>{project.wires.length} wires</p>
-          <p style={{margin: '2px 0'}}>{analysis.nets.length} electrical nodes</p>
+          <h3>{tr("Circuit Summary")}</h3>
+          <p style={{margin: '2px 0'}}>{project.components.length} {tr('components')}</p>
+          <p style={{margin: '2px 0'}}>{project.wires.length} {tr('wires')}</p>
+          <p style={{margin: '2px 0'}}>{analysis.nets.length} {tr('electrical nodes')}</p>
         </aside>
       </main>
     </div>
