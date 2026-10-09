@@ -2,6 +2,20 @@
 
 A beginner-friendly browser-based circuit design and SPICE simulation application with a modern 2D schematic editor, electrical net extraction, and Python FastAPI + ngspice simulation backend.
 
+## Windows desktop / แอปเดสก์ท็อป
+
+Install Rust and the [Tauri Windows prerequisites](https://v2.tauri.app/start/prerequisites/#windows), then run `npm install` and `npm run desktop:dev`. Build the Windows installer with `npm run desktop:build` (NSIS output under `src-tauri/target/release/bundle/nsis/`). Native Open/Save/Save As use `.json` or `.ocircuit` files; Export Netlist writes `.cir`. Theme/language preferences persist per desktop user. Web users can still run `npm run dev`.
+
+Simulation requires the separate Python/ngspice backend: run `npm run backend` with its dependencies installed. The desktop installer does not bundle the simulation service; schematic editing and netlist export work without it.
+
+
+## Component Library / คลังอุปกรณ์ (122 schematic symbols, 15 categories)
+
+OpenCircuit now includes **Place Part**, an in-app searchable library with **122 component templates in 15 categories**. Open it from the **คลังอุปกรณ์ / Parts Library** toolbar button, the left panel's **เลือกอุปกรณ์ทั้งหมด**, **Place → Browse All Parts**, or **Shift+P**. Browse categories, search English/Thai names, preview SVG symbols and pin counts, mark favorites, and click **เลือกวาง**. Then click the sheet to place the selected device. The left panel search also searches the entire catalog and supports drag-and-drop.
+
+The catalog is defined in `src/circuit/catalog.ts`. SVG symbols are in `src/LibrarySymbol.tsx`; the accessible picker is `src/PartPicker.tsx`. Catalog part records are stored as optional `partId` within the existing v2 `Component` schema. Existing saved projects remain readable. Catalog parts can be placed, moved, rotated, wired by their real schematic endpoints, inspected in Properties, saved, and reopened. The library is extensible by adding verified templates to the catalog.
+
+**Crucial limitations:** This is **not every electronic component or manufacturer part number**. The 122 parts are representative symbols, many with generic/illustrative pin names, **not verified PCB footprints or guaranteed datasheet pinouts**. They are labeled **schematic only** and block SPICE simulation with an explicit error. The six prior supported building blocks (R/C/L/DC voltage/Ground/Generic Op-Amp) retain their existing DC simulation support. Do not use generic pin numbers for fabrication without checking the actual manufacturer's datasheet. Importing manufacturer component packs, custom vendor models, and true footprints remains future work. No symbols, netlists, or files are scraped or copied from third-party schematic libraries.
 
 ## OrCAD Modernized — Current CAD editor additions (October 2026)
 The app now boots into an **editable Op-Amp schematic example**, rather than the old four-component starter view. Use **File → Open RC Starter Example** for the legacy circuit, or **New** for a blank schematic.

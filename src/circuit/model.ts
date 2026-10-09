@@ -1,6 +1,7 @@
-export type Kind = 'R' | 'C' | 'L' | 'V' | 'G' | 'O';
+import {findLibraryPart} from './catalog.ts';
+export type Kind = 'R' | 'C' | 'L' | 'V' | 'G' | 'O' | 'P';
 export type Rotation = 0 | 90 | 180 | 270;
-export type Component = {id: string; kind: Kind; value: string; pins: string[]};
+export type Component = {id: string; kind: Kind; value: string; pins: string[]; partId?: string};
 export type Wire = {id: string; from: string; to: string; bends?: {x: number; y: number}[]};
 export type Placement = {x: number; y: number; rotation: Rotation};
 export type Point = {x: number; y: number};
@@ -8,8 +9,8 @@ export type Project = {version: 2; components: Component[]; wires: Wire[]; schem
 
 export const GRID = 20;
 export const snap = (value: number) => Math.round(value / GRID) * GRID;
-export const defaults: Record<Kind, string> = {R: '1kΩ', C: '100nF', L: '10mH', V: '5V', G: 'GND', O: 'Generic Op-Amp'};
-export const names: Record<Kind, string> = {R: 'Resistor', C: 'Capacitor', L: 'Inductor', V: 'Voltage Source', G: 'Ground', O: 'Op-Amp (5-pin)'};
+export const defaults: Record<Kind, string> = {R: '1kΩ', C: '100nF', L: '10mH', V: '5V', G: 'GND', O: 'Generic Op-Amp', P: 'Library Part'};
+export const names: Record<Kind, string> = {R: 'Resistor', C: 'Capacitor', L: 'Inductor', V: 'Voltage Source', G: 'Ground', O: 'Op-Amp (5-pin)', P: 'Library Part'};
 export const pinLabels: Record<Kind, string[]> = {
   R: ['1', '2'],
   C: ['1', '2'],
@@ -17,8 +18,9 @@ export const pinLabels: Record<Kind, string[]> = {
   V: ['−', '+'], // pin 0 is negative (-), pin 1 is positive (+)
   G: ['GND'],
   O: ['IN−', 'IN+', 'OUT', 'V+', 'V−'],
+  P: [],
 };
-const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G', 'O'];
+const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G', 'O', 'P'];
 const rotations: Rotation[] = [0, 90, 180, 270];
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -27,7 +29,13 @@ const validId = (value: unknown): value is string =>
 const validPoint = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000;
 
-export function createComponent(kind: Kind, id: string): Component {
+export function createComponent(kind: Kind, id: string, partId?: string): Component {
+  if (kind === 'P') {
+    const definition = partId ? findLibraryPart(partId) : undefined;
+    if (!definition || definition.kind !== 'P') throw new Error(`Unknown library part: ${partId ?? ''}`);
+    return {id, kind, partId: definition.id, value: definition.defaultValue,
+      pins: definition.pins.map((_, index) => `${id}:${index}`)};
+  }
   return {id, kind, value: defaults[kind], pins: Array.from({length: kind === 'G' ? 1 : kind === 'O' ? 5 : 2}, (_, i) => `${id}:${i}`)};
 }
 
@@ -35,8 +43,10 @@ export function pinPosition(component: Component, placement: Placement, pin: str
   const index = component.pins.indexOf(pin);
   if (index < 0) return null;
   const opampPins = [{x: -60, y: -20}, {x: -60, y: 20}, {x: 80, y: 0}, {x: 0, y: -60}, {x: 0, y: 60}];
-  const dx = component.kind === 'O' ? opampPins[index].x : component.kind === 'G' ? 0 : index === 0 ? -40 : 40;
-  const dy = component.kind === 'O' ? opampPins[index].y : component.kind === 'G' ? -30 : 0;
+  const custom = component.kind === 'P' ? findLibraryPart(component.partId ?? '')?.pins[index] : undefined;
+  if (component.kind === 'P' && !custom) return null;
+  const dx = component.kind === 'P' ? custom!.x : component.kind === 'O' ? opampPins[index].x : component.kind === 'G' ? 0 : index === 0 ? -40 : 40;
+  const dy = component.kind === 'P' ? custom!.y : component.kind === 'O' ? opampPins[index].y : component.kind === 'G' ? -30 : 0;
   const angle = placement.rotation * Math.PI / 180;
   return {x: placement.x + Math.round(dx * Math.cos(angle) - dy * Math.sin(angle)),
     y: placement.y + Math.round(dx * Math.sin(angle) + dy * Math.cos(angle))};
@@ -72,7 +82,8 @@ export function parseProject(text: string): Project {
       componentIds.has(entry.id)) throw new Error('Invalid or duplicate component.');
     componentIds.add(entry.id);
     const kind = entry.kind as Kind;
-    const component = createComponent(kind, entry.id);
+    const component = createComponent(kind, entry.id, kind === 'P' ? entry.partId as string : undefined);
+    if (kind !== 'P' && entry.partId !== undefined) throw new Error('Unexpected library part ID.');
     const pins = entry.pins;
     if (!legacy && (!Array.isArray(pins) || pins.length !== component.pins.length ||
       !component.pins.every((pin, i) => pins[i] === pin))) throw new Error('Invalid component pins.');

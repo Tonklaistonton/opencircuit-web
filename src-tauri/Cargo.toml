@@ -1,0 +1,24 @@
+[package]
+name = "opencircuit"
+version = "0.4.0"
+description = "OpenCircuit 2D electronic CAD"
+license = ""
+repository = ""
+edition = "2024"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "opencircuit_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2.12.1", features = [] }
+tauri-plugin-dialog = "2"
+tempfile = "3"

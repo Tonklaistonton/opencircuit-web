@@ -19,11 +19,11 @@ export const GENERIC_OPAMP_MODEL = [
 
 const prefixes: Record<string, number> = {p: 1e-12, n: 1e-9, u: 1e-6, 'µ': 1e-6,
   'μ': 1e-6, m: 1e-3, k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12};
-const units: Record<Exclude<Kind, 'G' | 'O'>, string[]> = {
+const units: Record<Exclude<Kind, 'G' | 'O' | 'P'>, string[]> = {
   R: ['', 'Ω', 'Ohm', 'ohms'], C: ['', 'F'], L: ['', 'H'], V: ['', 'V'],
 };
 
-export function parseValue(kind: Exclude<Kind, 'G' | 'O'>, value: string): number | null {
+export function parseValue(kind: Exclude<Kind, 'G' | 'O' | 'P'>, value: string): number | null {
   const match = /^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(meg|[pnuµμmkKMGT]?)\s*(Ω|Ohm|ohms|F|H|V)?\s*$/i.exec(value);
   if (!match) return null;
   const [, amount, rawPrefix, rawUnit = ''] = match;
@@ -40,8 +40,8 @@ export function extractNets(circuit: CircuitTopology): Nets {
   const names = new Set<string>();
   for (const component of circuit.components) {
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(component.id) || names.has(component.id) ||
-      !['R', 'C', 'L', 'V', 'G', 'O'].includes(component.kind) ||
-      component.pins.join('|') !== createComponent(component.kind, component.id).pins.join('|'))
+      !['R', 'C', 'L', 'V', 'G', 'O', 'P'].includes(component.kind) ||
+      component.pins.join('|') !== createComponent(component.kind, component.id, component.partId).pins.join('|'))
       throw new Error(`Invalid component or pins: ${component.id}`);
     names.add(component.id);
     for (const pin of component.pins) {
@@ -137,6 +137,10 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
     if (members.length > 1) members.forEach(([endpoint]) => connected.add(endpoint));
   }
   for (const component of circuit.components) {
+    if (component.kind === 'P') {
+      issues.push({severity: 'error', message: `${component.id}: Library part "${component.value}" is schematic-only. SPICE simulation for this family is not yet supported.`});
+      continue;
+    }
     if (component.kind === 'G') {
       if (!connected.has(component.pins[0])) issues.push({severity: 'warning', message: `${component.id}: Ground is not connected.`});
       continue;
@@ -170,7 +174,7 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
   while (changed) {
     changed = false;
     for (const component of circuit.components) {
-      if (component.kind === 'G' || component.kind === 'C') continue;
+      if (component.kind === 'G' || component.kind === 'C' || component.kind === 'P') continue;
       if (component.kind === 'O') {
         // The built-in behavioral source references ground and both supply rails.
         const output = nodeByPin.get(component.pins[2]);
@@ -195,12 +199,12 @@ export function analyzeCircuit(circuit: CircuitTopology): Analysis {
       issues.push({severity: 'error', message: `${net.name}: Floating node; add a DC path to Ground (capacitors do not provide one).`});
   }
   if (issues.some((issue) => issue.severity === 'error')) return {nets, issues, netlist: null};
-  const components = [...circuit.components].filter((component) => component.kind !== 'G')
+  const components = [...circuit.components].filter((component) => component.kind !== 'G' && component.kind !== 'P')
     .sort((a, b) => a.kind.localeCompare(b.kind, 'en') || a.id.localeCompare(b.id, 'en'));
-  const counts: Record<Exclude<Kind, 'G'>, number> = {R: 0, C: 0, L: 0, V: 0, O: 0};
+  const counts: Record<Exclude<Kind, 'G' | 'P'>, number> = {R: 0, C: 0, L: 0, V: 0, O: 0};
   const lines = ['OpenCircuit schematic'];
   for (const component of components) {
-    if (component.kind === 'G') continue;
+    if (component.kind === 'G' || component.kind === 'P') continue;
     const kind = component.kind;
     if (kind === 'O') {
       const pins = component.pins.map((pin) => nodeByPin.get(pin));

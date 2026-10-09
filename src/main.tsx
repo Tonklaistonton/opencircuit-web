@@ -21,7 +21,13 @@ import './style.css';
 import './cad-theme.css';
 import {CadMenuBar, CadToolRail} from './CadChrome';
 import {translate} from './i18n';
+import {findLibraryPart, PART_LIBRARY, searchLibrary} from './circuit/catalog';
+import type {LibraryPart} from './circuit/catalog';
+import {LibrarySymbol} from './LibrarySymbol';
+import {PartPicker} from './PartPicker';
 import type {Language} from './i18n';
+import {invoke} from '@tauri-apps/api/core';
+import {desktop, exportNativeNetlist, openNativeProject, saveNativeProject} from './desktop';
 
 type Tool = 'select' | 'wire' | 'pan' | Kind;
 type Selection = {type: 'component' | 'wire'; id: string} | null;
@@ -30,7 +36,8 @@ type Drag =
   | {type: 'pan'; pointerId: number; clientX: number; clientY: number; x: number; y: number; zoom: number}
   | {type: 'bend'; pointerId: number; wireId: string; index: number; original: XY};
 
-const kinds: Kind[] = ['R', 'C', 'L', 'V', 'G', 'O'];
+const quickKinds: Kind[] = ['R', 'C', 'L', 'V', 'G', 'O'];
+const kinds: Kind[] = [...quickKinds, 'P'];
 const FREE_WIRE_START = '__FREE_START__';
 type XY = {x: number; y: number};
 function orthogonalPath(points: XY[]): string {
@@ -88,6 +95,9 @@ function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem('opencircuit-language') === 'en' ? 'en' : 'th');
   const tr = (key: string) => translate(language, key);
   const [libraryQuery, setLibraryQuery] = useState('');
+  const sidebarMatches = libraryQuery.trim() ? searchLibrary(libraryQuery) : [];
+  const [partPickerOpen, setPartPickerOpen] = useState(false);
+  const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [showSheet, setShowSheet] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
   const [wireBends, setWireBends] = useState<{x: number; y: number}[]>([]);
@@ -98,9 +108,33 @@ function App() {
   const [preview, setPreview] = useState<{id: string; placement: Placement} | null>(null);
   const [viewport, setViewport] = useState({x: -240, y: -180, zoom: 0.58});
   const [message, setMessage] = useState('Op-Amp example loaded. Generic Op-Amp DC simulation is available (approximate model).');
+  const [projectPath, setProjectPath] = useState<string | null>(null);
+  const [savedSnapshot, setSavedSnapshot] = useState(() => JSON.stringify(opAmpExampleProject()));
+  const [preferencesLoaded, setPreferencesLoaded] = useState(!desktop);
+  const dirty = JSON.stringify(project) !== savedSnapshot;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
 
   useEffect(() => { localStorage.setItem('opencircuit-theme', theme); document.documentElement.dataset.theme = theme; }, [theme]);
   useEffect(() => { localStorage.setItem('opencircuit-language', language); document.documentElement.lang = language; }, [language]);
+  useEffect(() => {
+    if (!desktop) return;
+    void invoke<{theme: string; language: string} | null>('load_preferences').then((prefs) => {
+      if (prefs?.theme === 'dark' || prefs?.theme === 'light') setTheme(prefs.theme);
+      if (prefs?.language === 'th' || prefs?.language === 'en') setLanguage(prefs.language);
+    }).catch((error) => setMessage(`Preferences: ${String(error)}`)).finally(() => setPreferencesLoaded(true));
+  }, []);
+  useEffect(() => {
+    if (desktop && preferencesLoaded) void invoke('save_preferences', {preferences: {theme, language}}).catch((error) => setMessage(`Preferences: ${String(error)}`));
+  }, [theme, language, preferencesLoaded]);
+  useEffect(() => {
+    if (!desktop) return;
+    let unlisten: (() => void) | undefined;
+    void import('@tauri-apps/api/window').then(({getCurrentWindow}) => getCurrentWindow().onCloseRequested(async (event) => {
+      if (dirtyRef.current && !window.confirm('Unsaved circuit changes. Close without saving? / ยังไม่ได้บันทึก ต้องการปิดหรือไม่?')) event.preventDefault();
+    })).then((stop) => { unlisten = stop; });
+    return () => unlisten?.();
+  }, []);
   useEffect(() => {if (!pending) setFreeWireStart(null);}, [pending]);
 
   // Simulation state
@@ -170,10 +204,22 @@ function App() {
     setBendPreview(null);
   }
 
-  function addComponent(kind: Kind, location: {x: number; y: number}) {
+  function chooseLibraryPart(part: LibraryPart) {
+    setSelectedPartId(part.id);
+    setTool(part.kind);
+    setPending(null);
+    setWireBends([]);
+    setPartPickerOpen(false);
+    setMessage(language === 'th' ? `เลือก ${part.nameTh} แล้ว คลิกบนกระดาษเพื่อวางอุปกรณ์` : `Selected ${part.name}. Click the sheet to place.`);
+  }
+
+  function addComponent(kind: Kind, location: {x: number; y: number}, partId: string | null = selectedPartId) {
+    const selectedDefinition = partId ? findLibraryPart(partId) : undefined;
+    if (kind === 'P' && (!selectedDefinition || selectedDefinition.kind !== 'P')) return;
+    const prefix = kind === 'P' ? selectedDefinition!.refPrefix : kind === 'O' ? 'U' : kind;
     let index = 1;
-    while (project.components.some((item) => item.id === `${kind}${index}`)) index++;
-    const component = createComponent(kind, `${kind}${index}`);
+    while (project.components.some((item) => item.id === `${prefix}${index}`)) index++;
+    const component = createComponent(kind, `${prefix}${index}`, kind === 'P' ? selectedDefinition!.id : undefined);
     commit((val) => ({...val, components: [...val.components, component], schematic: {
       ...val.schematic, [component.id]: {
         x: Math.max(-1_000_000, Math.min(1_000_000, snap(location.x))),
@@ -346,8 +392,12 @@ function App() {
   }
 
   function loadOpAmpExample() {
-    if (project.wires.length > 0 && !window.confirm(tr('Load the Op-Amp example? Save your current project first.'))) return;
-    reset(opAmpExampleProject());
+    if (dirty && !window.confirm(tr('Load the Op-Amp example? Save your current project first.'))) return;
+    const example = opAmpExampleProject();
+    reset(example);
+    setProjectPath(null);
+    setSavedSnapshot(JSON.stringify(example));
+    if (desktop) void invoke('new_project');
     setTool('select');
     setSelected(null);
     setPending(null);
@@ -361,8 +411,12 @@ function App() {
   }
 
   function handleNewCircuit() {
-    if (project.components.length > 0 && !window.confirm(tr('Create new circuit? Any unsaved changes will be lost.'))) return;
-    reset({version: 2, components: [], wires: [], schematic: {}, junctions: {}});
+    if (dirty && !window.confirm(tr('Create new circuit? Any unsaved changes will be lost.'))) return;
+    const blank: Project = {version: 2, components: [], wires: [], schematic: {}, junctions: {}};
+    reset(blank);
+    setProjectPath(null);
+    setSavedSnapshot(JSON.stringify(blank));
+    if (desktop) void invoke('new_project');
     setSelected(null);
     setPending(null);
     setWireHoverPos(null);
@@ -372,16 +426,32 @@ function App() {
     setMessage('New blank circuit created.');
   }
 
+  function loadStarterExample() {
+    if (dirty && !window.confirm('Unsaved changes will be lost. Load RC example? / การแก้ไขที่ยังไม่บันทึกจะหายไป ต้องการเปิดตัวอย่าง RC หรือไม่?')) return;
+    const example = starterProject();
+    reset(example);
+    setProjectPath(null);
+    setSavedSnapshot(JSON.stringify(example));
+    if (desktop) void invoke('new_project');
+    setSelected(null);
+    setViewport({x: -240, y: -180, zoom: 0.58});
+    setSimStatus('idle'); setSimResult(null);
+  }
+
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (netlistDialog.current?.open || settingsDialog.current?.open) return;
+      if (netlistDialog.current?.open || settingsDialog.current?.open || partPickerOpen) return;
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA'].includes(target.tagName))) return;
       if (event.key === 'Escape') {
         drag.current = null; previewRef.current = null; setPreview(null);
         setPending(null); setWireBends([]); setWireHoverPos(null); setTool('select'); setMessage('Cancelled.');
       }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault(); void save(event.shiftKey);
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') {
+        event.preventDefault(); void openProject();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) redo(); else undo();
         setSelected(null);
@@ -391,6 +461,9 @@ function App() {
         event.preventDefault(); redo(); setSelected(null); setPending(null); setWireHoverPos(null);
       } else if (event.key === 'Delete' || event.key === 'Backspace') {
         if (selected) { event.preventDefault(); remove(); }
+      } else if (event.key.toLowerCase() === 'p' && event.shiftKey) {
+        event.preventDefault();
+        setPartPickerOpen(true);
       } else if (event.key === 'r' || event.key === 'R') {
         if (selected && selected.type === 'component') {
           event.preventDefault();
@@ -412,29 +485,55 @@ function App() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function save() {
-    download('circuit.json', JSON.stringify(project, null, 2), 'application/json');
+  async function save(as = false) {
+    try {
+      if (desktop) {
+        const path = await saveNativeProject(JSON.stringify(project, null, 2), projectPath, as);
+        if (!path) return;
+        setProjectPath(path);
+        setMessage(`Saved ${path}`);
+      } else {
+        download('circuit.json', JSON.stringify(project, null, 2), 'application/json');
+      }
+      setSavedSnapshot(JSON.stringify(project));
+    } catch (error) { setMessage(`Cannot save project: ${String(error)}`); }
+  }
+
+  async function openProject() {
+    if (!desktop) {upload.current?.click(); return;}
+    if (dirty && !window.confirm('Unsaved changes will be lost. Open another project? / การแก้ไขที่ยังไม่บันทึกจะหายไป ต้องการเปิดไฟล์อื่นหรือไม่?')) return;
+    try {
+      const opened = await openNativeProject();
+      if (opened) loadContents(opened.contents, opened.path);
+    } catch (error) {setMessage(`Cannot open project: ${String(error)}`);}
+  }
+
+  function loadContents(contents: string, path: string | null) {
+    const next = parseProject(contents);
+    reset(next);
+    setSavedSnapshot(JSON.stringify(next));
+    setProjectPath(path);
+    drag.current = null;
+    previewRef.current = null;
+    setPreview(null);
+    valueStart.current = null;
+    valueDraftRef.current = null;
+    setValueDraft(null);
+    setSelected(null);
+    setPending(null);
+    setWireHoverPos(null);
+    setSimStatus('idle');
+    setSimResult(null);
+    setSimError(null);
+    setMessage(`Project loaded (v${next.version}).`);
   }
 
   async function load(file?: File) {
     if (!file) return;
     try {
       if (file.size > 2_000_000) throw new Error('Project file is too large.');
-      const next = parseProject(await file.text());
-      reset(next);
-      drag.current = null;
-      previewRef.current = null;
-      setPreview(null);
-      valueStart.current = null;
-      valueDraftRef.current = null;
-      setValueDraft(null);
-      setSelected(null);
-      setPending(null);
-      setWireHoverPos(null);
-      setSimStatus('idle');
-      setSimResult(null);
-      setSimError(null);
-      setMessage(`Project loaded (v${next.version}).`);
+      if (dirty && !window.confirm('Unsaved changes will be lost. Open another project? / การแก้ไขที่ยังไม่บันทึกจะหายไป ต้องการเปิดไฟล์อื่นหรือไม่?')) return;
+      loadContents(await file.text(), null);
     } catch (error) {
       setMessage(`Cannot open project: ${error instanceof Error ? error.message : 'Invalid file.'}`);
     } finally {
@@ -485,13 +584,15 @@ function App() {
 
   return (
     <div className={`app theme-${theme}`}>
+      {partPickerOpen && <PartPicker language={language} onSelect={chooseLibraryPart} onClose={() => setPartPickerOpen(false)} />}
       <CadMenuBar groups={[
         {label: tr("File"), commands: [
           {label: tr("New Schematic"), run: handleNewCircuit},
-          {label: tr("Open Project…"), run: () => upload.current?.click()},
-          {label: tr("Save Project"), run: save},
+          {label: tr("Open Project…"), run: () => void openProject()},
+          {label: tr("Save Project"), run: () => void save()},
+          {label: language === 'th' ? 'บันทึกเป็น…' : 'Save Project As…', run: () => void save(true)},
           {label: tr("Open Op-Amp Example"), run: loadOpAmpExample},
-          {label: tr("Open RC Starter Example"), run: () => {reset(starterProject()); setSelected(null); setViewport({x: -240, y: -180, zoom: 0.58}); setSimStatus('idle'); setSimResult(null);}},
+          {label: tr("Open RC Starter Example"), run: loadStarterExample},
         ]},
         {label: tr("Edit"), commands: [
           {label: tr("Undo"), run: undo, disabled: !canUndo},
@@ -499,8 +600,9 @@ function App() {
           {label: tr("Select / Move"), run: () => {setTool('select'); setPending(null);}},
         ]},
         {label: tr("Place"), commands: [
+          {label: language === 'th' ? 'คลังอุปกรณ์ทั้งหมด… (Shift+P)' : 'Browse All Parts… (Shift+P)', run: () => setPartPickerOpen(true)},
           {label: tr('Wire'), run: () => {setTool('wire'); setPending(null); setWireBends([]);}},
-          ...kinds.map((kind) => ({label: tr(names[kind]), run: () => {setTool(kind); setPending(null);}})),
+          ...quickKinds.map((kind) => ({label: tr(names[kind]), run: () => {setTool(kind); setPending(null);}})),
         ]},
         {label: tr("View"), commands: [
           {label: tr(showSheet ? 'Hide Sheet Frame' : 'Show Sheet Frame'), run: () => setShowSheet((v) => !v)},
@@ -526,9 +628,10 @@ function App() {
             title={language === 'th' ? 'Switch to English' : 'เปลี่ยนเป็นภาษาไทย'}
             aria-label={language === 'th' ? 'Switch to English' : 'เปลี่ยนเป็นภาษาไทย'}
             aria-pressed={language === 'th'}>{language === 'th' ? 'EN · English' : 'TH · ไทย'}</button>
+          <button onClick={() => setPartPickerOpen(true)} title={language === 'th' ? 'ค้นหาอุปกรณ์ทั้งหมด' : 'Browse all components'} className="open-part-library">{language === 'th' ? '▦ คลังอุปกรณ์' : '▦ Parts Library'}</button>
           <button onClick={loadOpAmpExample} title={tr("Open editable Op-Amp schematic example")}>{tr("◈ Op-Amp Example")}</button>
           <button onClick={handleNewCircuit} title={tr("New circuit")}>{tr("＋ New")}</button>
-          <button onClick={() => upload.current?.click()} title={tr("Open saved project")}>{tr("⇪ Open")}</button>
+          <button onClick={() => void openProject()} title={tr("Open saved project")}>{tr("⇪ Open")}</button>
           <input
             ref={upload}
             type="file"
@@ -537,7 +640,7 @@ function App() {
             aria-label={tr("Open project JSON")}
             onChange={(event) => void load(event.target.files?.[0])}
           />
-          <button onClick={save} title={tr("Save circuit to JSON file")}>{tr("⤓ Save")}</button>
+          <button onClick={() => void save()} title={tr("Save circuit to JSON file")}>{tr("⤓ Save")}{dirty ? ' *' : ''}</button>
           <button onClick={() => {undo(); setSelected(null); setPending(null);}} disabled={!canUndo} title={tr("Undo (Ctrl+Z)")}>{tr("↶ Undo")}</button>
           <button onClick={() => {redo(); setSelected(null); setPending(null);}} disabled={!canRedo} title={tr("Redo (Ctrl+Y)")}>{tr("↷ Redo")}</button>
           <button
@@ -677,7 +780,10 @@ function App() {
           <>
             <h4 style={{margin: '12px 0 6px', fontSize: 12, textTransform: 'uppercase', color: '#64748b'}}>{tr("Deterministic Netlist")}</h4>
             <pre>{analysis.netlist}</pre>
-            <button onClick={() => {if (analysis.netlist) download('circuit.cir', analysis.netlist, 'text/plain');}}>
+            <button onClick={() => {if (analysis.netlist) {
+              if (desktop) void exportNativeNetlist(analysis.netlist).catch((error) => setMessage(`Cannot export netlist: ${String(error)}`));
+              else download('circuit.cir', analysis.netlist, 'text/plain');
+            }}}>
               {tr('Export Netlist (.cir)')}
             </button>
           </>
@@ -732,8 +838,25 @@ function App() {
           </button>
 
           <h3>{tr("Component Library")}</h3>
+          <button className="library-all-button" onClick={() => setPartPickerOpen(true)}>
+            <span>▦</span> {language === 'th' ? `เลือกอุปกรณ์ทั้งหมด (${PART_LIBRARY.length})` : `Browse All Parts (${PART_LIBRARY.length})`}
+          </button>
           <input className="library-search" value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder={tr("⌕ Search components...")} aria-label={tr("Search components")} />
-          {kinds.filter((kind) => `${kind} ${tr(names[kind])} ${translate('th', names[kind])}`.toLowerCase().includes(libraryQuery.trim().toLowerCase())).map((kind) => (
+          {libraryQuery.trim() ? <>
+            {sidebarMatches.slice(0, 8).map((part) => (
+              <button key={part.id} className={`library-search-result ${tool === part.kind && selectedPartId === part.id ? 'active' : ''}`}
+                title={language === 'th' ? part.descriptionTh : part.description}
+                onClick={() => chooseLibraryPart(part)} draggable
+                onDragStart={(event) => event.dataTransfer.setData('application/x-opencircuit-part', part.id)}>
+                <span className="component-symbol">{part.refPrefix}</span>
+                <span>{language === 'th' ? part.nameTh : part.name}</span>
+              </button>
+            ))}
+            {sidebarMatches.length === 0 && <p className="library-no-results">{language === 'th' ? 'ไม่พบอุปกรณ์ที่ค้นหา' : 'No parts found'}</p>}
+            {sidebarMatches.length > 8 && <button className="library-more-results" onClick={() => setPartPickerOpen(true)}>
+              {language === 'th' ? `พบ ${sidebarMatches.length} รายการ — เปิดคลังทั้งหมด` : `${sidebarMatches.length} matches — browse all`}
+            </button>}
+          </> : quickKinds.map((kind) => (
             <button
               key={kind}
               className={tool === kind ? 'active' : ''}
@@ -784,14 +907,17 @@ function App() {
                 if (location) finishWire({x: snap(location.x), y: snap(location.y)});
               }}
               onDragOver={(event) => {
-                if (event.dataTransfer.types.includes('application/x-opencircuit-kind')) event.preventDefault();
+                if (event.dataTransfer.types.includes('application/x-opencircuit-kind') ||
+                  event.dataTransfer.types.includes('application/x-opencircuit-part')) event.preventDefault();
               }}
               onDrop={(event) => {
+                const partId = event.dataTransfer.getData('application/x-opencircuit-part');
+                const part = partId ? findLibraryPart(partId) : undefined;
                 const kind = event.dataTransfer.getData('application/x-opencircuit-kind');
-                if (!kinds.includes(kind as Kind)) return;
+                if (!part && !quickKinds.includes(kind as Kind)) return;
                 event.preventDefault();
                 const location = point(event);
-                if (location) addComponent(kind as Kind, location);
+                if (location) addComponent(part ? part.kind : kind as Kind, location, part ? part.id : null);
               }}
               onWheel={(event) => {
                 event.preventDefault();
@@ -1039,6 +1165,8 @@ function App() {
                 const placement = preview?.id === component.id ? preview.placement : project.schematic[component.id];
                 if (!placement) return null;
                 const isSelected = selectedComponent?.id === component.id;
+                const partDefinition = component.kind === 'P' ? findLibraryPart(component.partId ?? '') : undefined;
+                const partRadius = partDefinition ? Math.max(85, ...partDefinition.pins.flatMap((pin) => [Math.abs(pin.x),Math.abs(pin.y)])) + 22 : 0;
                 return (
                   <g key={component.id}>
                     <g
@@ -1061,10 +1189,10 @@ function App() {
                       style={{cursor: tool === 'select' ? 'grab' : 'default'}}
                     >
                       <rect
-                        x={component.kind === 'O' ? -67 : -33}
-                        y={component.kind === 'O' ? -65 : -31}
-                        width={component.kind === 'O' ? 153 : 66}
-                        height={component.kind === 'O' ? 130 : 62}
+                        x={partDefinition ? -partRadius : component.kind === 'O' ? -67 : -33}
+                        y={partDefinition ? -partRadius : component.kind === 'O' ? -65 : -31}
+                        width={partDefinition ? partRadius * 2 : component.kind === 'O' ? 153 : 66}
+                        height={partDefinition ? partRadius * 2 : component.kind === 'O' ? 130 : 62}
                         rx="6"
                         fill={isSelected ? (theme === 'dark' ? '#213d52' : '#e0f2fe') : (theme === 'dark' ? '#182537' : '#fff')}
                         stroke={isSelected ? '#0284c7' : 'transparent'}
@@ -1077,14 +1205,14 @@ function App() {
                         fill="none"
                         strokeLinecap="round"
                       >
-                        <Symbol kind={component.kind} />
-                        {component.kind !== 'G' && component.kind !== 'O' && <path d="M-40 0 H-20 M20 0 H40" />}
+                        {partDefinition ? <LibrarySymbol part={partDefinition} /> : <Symbol kind={component.kind} />}
+                        {component.kind !== 'G' && component.kind !== 'O' && component.kind !== 'P' && <path d="M-40 0 H-20 M20 0 H40" />}
                       </g>
-                      <text x="0" y={component.kind === 'O' ? -74 : -37} textAnchor="middle" fontSize="15" fill={theme === 'dark' ? '#e0eaf7' : '#334155'} fontWeight="600">
+                      <text x="0" y={partDefinition ? -partRadius - 12 : component.kind === 'O' ? -74 : -37} textAnchor="middle" fontSize="15" fill={theme === 'dark' ? '#e0eaf7' : '#334155'} fontWeight="600">
                         {component.id}
                       </text>
-                      <text x="0" y={component.kind === 'O' ? 78 : 45} textAnchor="middle" fontSize="12" fill={theme === 'dark' ? '#a7b8cb' : '#64748b'}>
-                        {valueDraft?.id === component.id ? valueDraft.value : component.value}
+                      <text x="0" y={partDefinition ? partRadius + 16 : component.kind === 'O' ? 78 : 45} textAnchor="middle" fontSize="12" fill={theme === 'dark' ? '#a7b8cb' : '#64748b'}>
+                        {partDefinition ? (valueDraft?.id === component.id ? valueDraft.value : component.value).slice(0, 25) : (valueDraft?.id === component.id ? valueDraft.value : component.value)}
                       </text>
                     </g>
 
@@ -1092,7 +1220,7 @@ function App() {
                     {component.pins.map((pin, pIndex) => {
                       const position = pinLocations.get(pin);
                       const isPendingPin = pending === pin;
-                      const label = pinLabels[component.kind]?.[pIndex] ?? '';
+                      const label = component.kind === 'P' ? findLibraryPart(component.partId ?? '')?.pins[pIndex]?.name ?? '' : pinLabels[component.kind]?.[pIndex] ?? '';
                       return (
                         position && (
                           <g key={pin}>
@@ -1115,7 +1243,7 @@ function App() {
                                 fontWeight="700" fill={theme === 'dark' ? '#7fe3d4' : '#006b71'}
                                 pointerEvents="none">{project.netAliases[pin]}</text>
                             )}
-                            {(component.kind === 'V' || component.kind === 'O') && (
+                            {(component.kind === 'V' || component.kind === 'O' || component.kind === 'P') && (
                               <text
                                 x={position.x}
                                 y={position.y - 10}
@@ -1270,8 +1398,15 @@ function App() {
             <>
               <label>{tr("Component")}</label>
               <p>
-                <strong>{selectedComponent.id}</strong> · {tr(names[selectedComponent.kind])}
+                <strong>{selectedComponent.id}</strong> · {selectedComponent.kind === 'P' ?
+                  (language === 'th' ? findLibraryPart(selectedComponent.partId ?? '')?.nameTh : findLibraryPart(selectedComponent.partId ?? '')?.name) :
+                  tr(names[selectedComponent.kind])}
               </p>
+              {selectedComponent.kind === 'P' && <div className="library-part-notice">
+                <strong>{language === 'th' ? 'สัญลักษณ์สำหรับเขียนวงจร' : 'Schematic symbol'}</strong>
+                <p>{language === 'th' ? 'วาง หมุน เดินสาย และบันทึกได้ แต่ยังจำลองด้วย SPICE ไม่ได้ โปรดตรวจสอบขาจริงจาก Datasheet ก่อนผลิต' : 'Place, rotate, wire and save; SPICE model not yet available. Verify real pinout before manufacturing.'}</p>
+                <button type="button" onClick={() => setPartPickerOpen(true)}>{language === 'th' ? 'เปิดคลังอุปกรณ์' : 'Browse library'}</button>
+              </div>}
               <label htmlFor="component-value">{tr("Value")}</label>
               <input
                 id="component-value"
@@ -1317,7 +1452,7 @@ function App() {
                 <strong style={{display: 'block', marginBottom: 4, color: '#475569'}}>{tr("Electrical Connections")}</strong>
                 {selectedComponent.pins.map((pin, idx) => {
                   const node = analysis.nets.find((net) => net.pins.includes(pin))?.name ?? 'unconnected';
-                  const label = pinLabels[selectedComponent.kind]?.[idx] ?? '';
+                  const label = selectedComponent.kind === 'P' ? findLibraryPart(selectedComponent.partId ?? '')?.pins[idx]?.name ?? '' : pinLabels[selectedComponent.kind]?.[idx] ?? '';
                   return (
                     <div key={pin}>
                       <span>{label ? `${tr('Pin')} ${label} (${pin})` : pin}:</span>
